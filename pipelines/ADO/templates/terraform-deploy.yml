@@ -1,0 +1,764 @@
+# Reusable Terraform deployment stage template.
+#
+# Generates an independent Validate -> Plan -> Security scan -> Apply
+# stage chain for every environment whose `deploy` flag is on, so a
+# single run can target any combination of environments (selected with
+# checkboxes at queue time) and the chains run in parallel. Which
+# stages each chain contains is also selected at queue time through the
+# runValidate / runPlan / runSecurityScan / runApply toggles; each
+# environment's apply is still gated by that environment's Azure DevOps
+# environment approvals.
+#
+# This file deliberately contains no trigger or pr configuration.
+# Those belong in the top-level pipeline file.
+
+parameters:
+
+  # ----------------------------------------------------------
+  # Workload settings
+  # ----------------------------------------------------------
+
+  - name: workloadName
+    type: string
+
+  - name: terraformRoot
+    type: string
+
+  - name: tfvarsFolder
+    type: string
+    default: environments
+
+  - name: terraformVersion
+    type: string
+    default: '1.13.5'
+
+  - name: agentImage
+    type: string
+    default: ubuntu-latest
+
+  # Name of a self-hosted agent pool to run on instead of the hosted
+  # image, e.g. for workloads whose plan reads secrets from a key
+  # vault's private data plane.
+  - name: agentPoolName
+    type: string
+    default: ''
+
+  # ----------------------------------------------------------
+  # Environment-specific configuration
+  #
+  # Expected shape (deploy selects the environment for this run and
+  # normally comes from a checkbox parameter on the workload pipeline):
+  #
+  # environments:
+  #   rd:
+  #     deploy: true
+  #     serviceConnection: azure-terraform-rd
+  #     stateKey: networking-rd.tfstate
+  #     azureDevOpsEnvironment: terraform-networking-rd
+  #   dev:
+  #     ...
+  # ----------------------------------------------------------
+
+  - name: environments
+    type: object
+
+  # ----------------------------------------------------------
+  # Stage selection
+  # ----------------------------------------------------------
+
+  - name: runValidate
+    type: boolean
+    default: true
+
+  - name: runPlan
+    type: boolean
+    default: true
+
+  - name: runSecurityScan
+    type: boolean
+    default: true
+
+  # Apply needs the plan produced earlier in the same run, so it only
+  # runs when runPlan is also on.
+  - name: runApply
+    type: boolean
+    default: true
+
+  # ----------------------------------------------------------
+  # Pipeline behaviour
+  # ----------------------------------------------------------
+
+  # When true, security scan findings mark the stage with a warning
+  # (partially succeeded) instead of failing it, so the deployment
+  # continues while the findings stay visible in the run. Set false
+  # to make findings fail the stage and block the apply.
+  - name: securityScanWarnOnly
+    type: boolean
+    default: true
+
+  - name: trivyVersion
+    type: string
+    default: latest
+
+  - name: trivyScanners
+    type: string
+    default: misconfig,secret
+
+  - name: trivySeverities
+    type: string
+    default: HIGH,CRITICAL
+
+  - name: trivyExitCode
+    type: string
+    default: '1'
+
+  - name: checkovVersion
+    type: string
+    default: latest
+
+  # Extra checkov arguments, e.g. --skip-check CKV_AZURE_1 or
+  # --soft-fail to report without failing the stage.
+  - name: checkovAdditionalArgs
+    type: string
+    default: ''
+
+  # The JSON plan is written unredacted, including values Terraform
+  # normally hides. Disable for workloads whose state contains generated
+  # secrets, e.g. virtual machine passwords.
+  - name: publishJsonPlan
+    type: boolean
+    default: true
+
+  # The saved binary plan also embeds state values and can be decoded
+  # by anyone who can read pipeline artifacts. Disable for workloads
+  # whose state contains generated secrets: no plan artifacts are
+  # published, and the exact reviewed plan is handed to the
+  # approval-gated apply job through the state storage account
+  # instead. The readable plan (which redacts sensitive values) is
+  # still published for review.
+  - name: publishSavedPlan
+    type: boolean
+    default: true
+
+  - name: applyOnPullRequests
+    type: boolean
+    default: false
+
+  - name: terraformPlanAdditionalArgs
+    type: string
+    default: ''
+
+  - name: terraformApplyAdditionalArgs
+    type: string
+    default: ''
+
+
+stages:
+
+- ${{ each env in parameters.environments }}:
+  - ${{ if eq(lower(env.value.deploy), 'true') }}:
+
+    # ============================================================
+    # VALIDATE
+    # ============================================================
+
+    - ${{ if eq(parameters.runValidate, true) }}:
+      - stage: Validate_${{ env.key }}
+        displayName: >-
+          Validate ${{ parameters.workloadName }}
+          (${{ env.key }})
+        dependsOn: []
+
+        jobs:
+          - job: TerraformValidate
+            displayName: 'Terraform validate'
+
+            pool:
+              ${{ if ne(parameters.agentPoolName, '') }}:
+                name: ${{ parameters.agentPoolName }}
+              ${{ if eq(parameters.agentPoolName, '') }}:
+                vmImage: ${{ parameters.agentImage }}
+
+            steps:
+              - checkout: self
+
+              - task: TerraformInstaller@1
+                displayName: 'Install Terraform ${{ parameters.terraformVersion }}'
+                inputs:
+                  terraformVersion: ${{ parameters.terraformVersion }}
+
+              - bash: |
+                  set -euxo pipefail
+
+                  echo "Workload: ${{ parameters.workloadName }}"
+                  echo "Environment: ${{ env.key }}"
+                  echo "Terraform root: ${{ parameters.terraformRoot }}"
+
+                  terraform version
+
+                  terraform fmt \
+                    -check \
+                    -recursive
+
+                  terraform init \
+                    -backend=false \
+                    -input=false
+
+                  terraform validate
+                workingDirectory: >-
+                  $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+                displayName: 'Format and validate Terraform'
+
+
+    # ============================================================
+    # PLAN
+    # ============================================================
+
+    - ${{ if eq(parameters.runPlan, true) }}:
+      - stage: Plan_${{ env.key }}
+        displayName: >-
+          Plan ${{ parameters.workloadName }}
+          (${{ env.key }})
+
+        ${{ if eq(parameters.runValidate, true) }}:
+          dependsOn: Validate_${{ env.key }}
+        ${{ if eq(parameters.runValidate, false) }}:
+          dependsOn: []
+
+        condition: succeeded()
+
+        jobs:
+          - job: TerraformPlan
+            displayName: 'Terraform plan'
+
+            pool:
+              ${{ if ne(parameters.agentPoolName, '') }}:
+                name: ${{ parameters.agentPoolName }}
+              ${{ if eq(parameters.agentPoolName, '') }}:
+                vmImage: ${{ parameters.agentImage }}
+
+            steps:
+              - checkout: self
+
+              - task: TerraformInstaller@1
+                displayName: 'Install Terraform ${{ parameters.terraformVersion }}'
+                inputs:
+                  terraformVersion: ${{ parameters.terraformVersion }}
+
+              - bash: |
+                  set -euo pipefail
+
+                  echo "Workload: ${{ parameters.workloadName }}"
+                  echo "Environment: ${{ env.key }}"
+                  echo "Terraform root: ${{ parameters.terraformRoot }}"
+                  echo "Service connection: ${{ env.value.serviceConnection }}"
+                  echo "State key: ${{ env.value.stateKey }}"
+                  echo "Azure DevOps environment: ${{ env.value.azureDevOpsEnvironment }}"
+                displayName: 'Show resolved deployment settings'
+
+              - task: AzureCLI@2
+                displayName: 'Create Terraform plan'
+                inputs:
+                  # Despite its name, this expects an Azure DevOps
+                  # Azure Resource Manager service connection.
+                  azureSubscription: >-
+                    ${{ env.value.serviceConnection }}
+
+                  scriptType: bash
+                  scriptLocation: inlineScript
+                  addSpnToEnvironment: true
+
+                  workingDirectory: >-
+                    $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+
+                  inlineScript: |
+                    set -euxo pipefail
+
+                    # When the plan is handed over via the state storage
+                    # account it must never survive this step, whatever
+                    # fails below - on a self-hosted agent a leftover
+                    # unredacted plan would be readable by later jobs.
+                    if [ "${{ lower(parameters.publishSavedPlan) }}" = "false" ]; then
+                      trap 'rm -f tfplan' EXIT
+                    fi
+
+                    export ARM_CLIENT_ID="$servicePrincipalId"
+                    export ARM_TENANT_ID="$tenantId"
+                    export ARM_SUBSCRIPTION_ID="$(
+                      az account show \
+                        --query id \
+                        --output tsv
+                    )"
+
+                    if [ -n "${idToken:-}" ]; then
+                      export ARM_USE_OIDC=true
+                      export ARM_OIDC_TOKEN="$idToken"
+                    else
+                      export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                    fi
+
+                    echo "Authenticated Azure context:"
+
+                    az account show \
+                      --query '{
+                        subscriptionName:name,
+                        subscriptionId:id,
+                        tenantId:tenantId
+                      }' \
+                      --output table
+
+                    terraform init \
+                      -input=false \
+                      -reconfigure \
+                      -backend-config="subscription_id=$(backendSubscriptionId)" \
+                      -backend-config="resource_group_name=$(backendResourceGroup)" \
+                      -backend-config="storage_account_name=$(backendStorageAccount)" \
+                      -backend-config="container_name=$(backendContainer)" \
+                      -backend-config="key=${{ env.value.stateKey }}" \
+                      -backend-config="use_azuread_auth=true"
+
+                    terraform plan \
+                      -input=false \
+                      -lock-timeout=5m \
+                      -var-file="${{ parameters.tfvarsFolder }}/${{ env.key }}.tfvars" \
+                      ${{ parameters.terraformPlanAdditionalArgs }} \
+                      -out=tfplan
+
+                    terraform show \
+                      tfplan \
+                      > tfplan.txt
+
+                    # The JSON plan is unredacted, so it is only ever
+                    # written when it is going to be published.
+                    if [ "${{ lower(parameters.publishJsonPlan) }}" = "true" ] \
+                      && [ "${{ lower(parameters.publishSavedPlan) }}" = "true" ]; then
+                      terraform show \
+                        -json \
+                        tfplan \
+                        > tfplan.json
+                    fi
+
+                    # Without published plan artifacts, hand the exact plan
+                    # to the apply stage through the state storage account,
+                    # which is already access-controlled and Entra
+                    # authenticated. Only uploaded when this run includes
+                    # an apply; the cleanup stage removes it afterwards
+                    # whatever the apply's outcome, and the EXIT trap
+                    # above removes the local copy so it cannot linger in
+                    # a self-hosted agent's workspace.
+                    if [ "${{ lower(parameters.publishSavedPlan) }}" = "false" ]; then
+                      if [ "${{ lower(parameters.runApply) }}" = "true" ]; then
+                        az storage blob upload \
+                          --auth-mode login \
+                          --overwrite \
+                          --account-name "$(backendStorageAccount)" \
+                          --container-name "$(backendContainer)" \
+                          --name "plans/${{ parameters.workloadName }}-${{ env.key }}-$(Build.BuildId).tfplan" \
+                          --file tfplan
+                      fi
+                    fi
+
+              - ${{ if eq(parameters.publishSavedPlan, true) }}:
+                - publish: >-
+                    $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}/tfplan
+                  artifact: >-
+                    terraform-plan-${{ parameters.workloadName }}-${{ env.key }}
+                  displayName: 'Publish saved Terraform plan'
+
+              - publish: >-
+                  $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}/tfplan.txt
+                artifact: >-
+                  terraform-plan-readable-${{ parameters.workloadName }}-${{ env.key }}
+                displayName: 'Publish readable Terraform plan'
+
+              - ${{ if and(eq(parameters.publishJsonPlan, true), eq(parameters.publishSavedPlan, true)) }}:
+                - publish: >-
+                    $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}/tfplan.json
+                  artifact: >-
+                    terraform-plan-json-${{ parameters.workloadName }}-${{ env.key }}
+                  displayName: 'Publish JSON Terraform plan'
+
+
+    # ============================================================
+    # SECURITY
+    #
+    # Trivy and Checkov scan the same configuration in parallel
+    # jobs. With securityScanWarnOnly on (the default) findings mark
+    # the stage with a warning and the run continues; otherwise the
+    # stage fails if either scanner finds a problem.
+    # ============================================================
+
+    - ${{ if eq(parameters.runSecurityScan, true) }}:
+      - stage: Security_${{ env.key }}
+        displayName: >-
+          Security scan ${{ parameters.workloadName }}
+          (${{ env.key }})
+
+        ${{ if eq(parameters.runPlan, true) }}:
+          dependsOn: Plan_${{ env.key }}
+        ${{ if and(eq(parameters.runPlan, false), eq(parameters.runValidate, true)) }}:
+          dependsOn: Validate_${{ env.key }}
+        ${{ if and(eq(parameters.runPlan, false), eq(parameters.runValidate, false)) }}:
+          dependsOn: []
+
+        condition: succeeded()
+
+        jobs:
+          - job: TrivyScan
+            displayName: 'Trivy IaC scan'
+
+            pool:
+              ${{ if ne(parameters.agentPoolName, '') }}:
+                name: ${{ parameters.agentPoolName }}
+              ${{ if eq(parameters.agentPoolName, '') }}:
+                vmImage: ${{ parameters.agentImage }}
+
+            steps:
+              - checkout: self
+
+              # The task's own scan output goes to a JSON file for the
+              # extension's results view, not the console log, so the
+              # table report is generated as well and printed by the
+              # step below.
+              - task: trivy@1
+                name: Trivy
+                displayName: 'Run Trivy IaC scan'
+                continueOnError: ${{ parameters.securityScanWarnOnly }}
+                inputs:
+                  version: ${{ parameters.trivyVersion }}
+
+                  path: >-
+                    $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+
+                  scanners: ${{ parameters.trivyScanners }}
+                  severities: ${{ parameters.trivySeverities }}
+                  exitCode: ${{ parameters.trivyExitCode }}
+                  tableOutput: true
+
+              # Runs whether or not the scan found problems, so the
+              # findings behind a failed (or warning) scan are readable
+              # straight from the log. The report path comes in through
+              # env because when the scan dies before publishing the
+              # output variable, the macro stays unreplaced and inline
+              # bash would run it as a command substitution.
+              - bash: |
+                  set -euo pipefail
+
+                  if [ -f "$TRIVY_TABLE_REPORT" ]; then
+                    cat "$TRIVY_TABLE_REPORT"
+                  else
+                    echo "##vso[task.logissue type=warning]No Trivy table report was produced."
+                  fi
+                displayName: 'Show Trivy findings'
+                condition: succeededOrFailed()
+                env:
+                  TRIVY_TABLE_REPORT: $(Trivy.tableReport)
+
+          - job: CheckovScan
+            displayName: 'Checkov IaC scan'
+
+            pool:
+              ${{ if ne(parameters.agentPoolName, '') }}:
+                name: ${{ parameters.agentPoolName }}
+              ${{ if eq(parameters.agentPoolName, '') }}:
+                vmImage: ${{ parameters.agentImage }}
+
+            steps:
+              - checkout: self
+
+              - bash: |
+                  set -euo pipefail
+
+                  if [ "${{ parameters.checkovVersion }}" = "latest" ]; then
+                    pip3 install --quiet --user checkov
+                  else
+                    pip3 install --quiet --user "checkov==${{ parameters.checkovVersion }}"
+                  fi
+                displayName: 'Install Checkov'
+
+              # Only the scan itself may warn instead of fail -
+              # installation problems above always fail the stage, so
+              # an apply can never proceed just because the scanner
+              # failed to run at all.
+              - bash: |
+                  set -euo pipefail
+
+                  export PATH="$HOME/.local/bin:$PATH"
+
+                  checkov --version
+
+                  checkov \
+                    --directory "$(Build.SourcesDirectory)/${{ parameters.terraformRoot }}" \
+                    --framework terraform \
+                    --download-external-modules false \
+                    --compact \
+                    ${{ parameters.checkovAdditionalArgs }}
+                displayName: 'Run Checkov IaC scan'
+                continueOnError: ${{ parameters.securityScanWarnOnly }}
+
+
+    # ============================================================
+    # APPLY
+    #
+    # Applies the plan produced earlier in this run, so it is only
+    # generated when the Plan stage runs too.
+    # ============================================================
+
+    - ${{ if and(eq(parameters.runApply, true), eq(parameters.runPlan, true)) }}:
+      - stage: Apply_${{ env.key }}
+        displayName: >-
+          Apply ${{ parameters.workloadName }}
+          (${{ env.key }})
+
+        ${{ if eq(parameters.runSecurityScan, true) }}:
+          dependsOn: Security_${{ env.key }}
+
+        ${{ if eq(parameters.runSecurityScan, false) }}:
+          dependsOn: Plan_${{ env.key }}
+
+        condition: |
+          and(
+            succeeded(),
+            or(
+              ${{ parameters.applyOnPullRequests }},
+              ne(variables['Build.Reason'], 'PullRequest')
+            )
+          )
+
+        jobs:
+          - deployment: TerraformApply
+            displayName: 'Terraform apply'
+
+            environment: >-
+              ${{ env.value.azureDevOpsEnvironment }}
+
+            pool:
+              ${{ if ne(parameters.agentPoolName, '') }}:
+                name: ${{ parameters.agentPoolName }}
+              ${{ if eq(parameters.agentPoolName, '') }}:
+                vmImage: ${{ parameters.agentImage }}
+
+            strategy:
+              runOnce:
+                deploy:
+                  steps:
+                    - checkout: self
+
+                    - ${{ if eq(parameters.publishSavedPlan, true) }}:
+                      - download: current
+                        artifact: >-
+                          terraform-plan-${{ parameters.workloadName }}-${{ env.key }}
+                        displayName: 'Download saved Terraform plan'
+
+                    - task: TerraformInstaller@1
+                      displayName: >-
+                        Install Terraform ${{ parameters.terraformVersion }}
+                      inputs:
+                        terraformVersion: ${{ parameters.terraformVersion }}
+
+                    - ${{ if eq(parameters.publishSavedPlan, true) }}:
+                      - bash: |
+                          set -euxo pipefail
+
+                          cp \
+                            "$(Pipeline.Workspace)/terraform-plan-${{ parameters.workloadName }}-${{ env.key }}/tfplan" \
+                            "$(Build.SourcesDirectory)/${{ parameters.terraformRoot }}/tfplan"
+                        displayName: 'Restore saved Terraform plan'
+
+                    - ${{ if eq(parameters.publishSavedPlan, true) }}:
+                      - task: AzureCLI@2
+                        displayName: 'Apply saved Terraform plan'
+                        inputs:
+                          azureSubscription: >-
+                            ${{ env.value.serviceConnection }}
+
+                          scriptType: bash
+                          scriptLocation: inlineScript
+                          addSpnToEnvironment: true
+
+                          workingDirectory: >-
+                            $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+
+                          inlineScript: |
+                            set -euxo pipefail
+
+                            # Whatever happens below, the plan copies must
+                            # not survive this step in a self-hosted
+                            # agent's workspace.
+                            trap 'rm -f tfplan "$(Pipeline.Workspace)/terraform-plan-${{ parameters.workloadName }}-${{ env.key }}/tfplan"' EXIT
+
+                            export ARM_CLIENT_ID="$servicePrincipalId"
+                            export ARM_TENANT_ID="$tenantId"
+                            export ARM_SUBSCRIPTION_ID="$(
+                              az account show \
+                                --query id \
+                                --output tsv
+                            )"
+
+                            if [ -n "${idToken:-}" ]; then
+                              export ARM_USE_OIDC=true
+                              export ARM_OIDC_TOKEN="$idToken"
+                            else
+                              export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                            fi
+
+                            terraform init \
+                              -input=false \
+                              -reconfigure \
+                              -backend-config="subscription_id=$(backendSubscriptionId)" \
+                              -backend-config="resource_group_name=$(backendResourceGroup)" \
+                              -backend-config="storage_account_name=$(backendStorageAccount)" \
+                              -backend-config="container_name=$(backendContainer)" \
+                              -backend-config="key=${{ env.value.stateKey }}" \
+                              -backend-config="use_azuread_auth=true"
+
+                            terraform apply \
+                              -input=false \
+                              -lock-timeout=5m \
+                              ${{ parameters.terraformApplyAdditionalArgs }} \
+                              tfplan
+
+                    # Without published plan artifacts, the exact reviewed
+                    # plan is retrieved from the state storage account, so
+                    # the approval still gates precisely what gets applied
+                    # while the plan stays out of pipeline artifacts.
+                    - ${{ if eq(parameters.publishSavedPlan, false) }}:
+                      - task: AzureCLI@2
+                        displayName: 'Apply Terraform plan from state storage'
+                        inputs:
+                          azureSubscription: >-
+                            ${{ env.value.serviceConnection }}
+
+                          scriptType: bash
+                          scriptLocation: inlineScript
+                          addSpnToEnvironment: true
+
+                          workingDirectory: >-
+                            $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+
+                          inlineScript: |
+                            set -euxo pipefail
+
+                            # Whatever happens below, the plan must not
+                            # survive this step in a self-hosted agent's
+                            # workspace.
+                            trap 'rm -f tfplan' EXIT
+
+                            export ARM_CLIENT_ID="$servicePrincipalId"
+                            export ARM_TENANT_ID="$tenantId"
+                            export ARM_SUBSCRIPTION_ID="$(
+                              az account show \
+                                --query id \
+                                --output tsv
+                            )"
+
+                            if [ -n "${idToken:-}" ]; then
+                              export ARM_USE_OIDC=true
+                              export ARM_OIDC_TOKEN="$idToken"
+                            else
+                              export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                            fi
+
+                            terraform init \
+                              -input=false \
+                              -reconfigure \
+                              -backend-config="subscription_id=$(backendSubscriptionId)" \
+                              -backend-config="resource_group_name=$(backendResourceGroup)" \
+                              -backend-config="storage_account_name=$(backendStorageAccount)" \
+                              -backend-config="container_name=$(backendContainer)" \
+                              -backend-config="key=${{ env.value.stateKey }}" \
+                              -backend-config="use_azuread_auth=true"
+
+                            az storage blob download \
+                              --auth-mode login \
+                              --account-name "$(backendStorageAccount)" \
+                              --container-name "$(backendContainer)" \
+                              --name "plans/${{ parameters.workloadName }}-${{ env.key }}-$(Build.BuildId).tfplan" \
+                              --file tfplan
+
+                            terraform apply \
+                              -input=false \
+                              -lock-timeout=5m \
+                              ${{ parameters.terraformApplyAdditionalArgs }} \
+                              tfplan
+
+                            az storage blob delete \
+                              --auth-mode login \
+                              --account-name "$(backendStorageAccount)" \
+                              --container-name "$(backendContainer)" \
+                              --name "plans/${{ parameters.workloadName }}-${{ env.key }}-$(Build.BuildId).tfplan"
+
+
+    # ============================================================
+    # CLEANUP
+    #
+    # The plan blob uploaded to the state storage account contains
+    # sensitive values, and the apply stage only removes it after a
+    # successful apply. This finalizer always runs - after a failed
+    # scan, a rejected or timed-out approval, a cancelled run or a
+    # failed apply - so the blob never outlives its run.
+    # ============================================================
+
+    - ${{ if and(eq(parameters.publishSavedPlan, false), eq(parameters.runApply, true), eq(parameters.runPlan, true)) }}:
+      - stage: Cleanup_${{ env.key }}
+        displayName: >-
+          Clean up plan ${{ parameters.workloadName }}
+          (${{ env.key }})
+
+        dependsOn:
+          - Plan_${{ env.key }}
+          - Apply_${{ env.key }}
+
+        condition: always()
+
+        jobs:
+          - job: DeletePlanBlob
+            displayName: 'Delete plan blob from state storage'
+
+            pool:
+              ${{ if ne(parameters.agentPoolName, '') }}:
+                name: ${{ parameters.agentPoolName }}
+              ${{ if eq(parameters.agentPoolName, '') }}:
+                vmImage: ${{ parameters.agentImage }}
+
+            steps:
+              - checkout: none
+
+              - task: AzureCLI@2
+                displayName: 'Delete plan blob'
+                inputs:
+                  azureSubscription: >-
+                    ${{ env.value.serviceConnection }}
+
+                  scriptType: bash
+                  scriptLocation: inlineScript
+
+                  inlineScript: |
+                    set -euo pipefail
+
+                    # The apply stage already deletes the blob after a
+                    # successful apply, so it may legitimately be gone -
+                    # only that confirmed not-found case is ignored. Any
+                    # other failure (authentication, authorisation,
+                    # transient storage errors) fails the stage rather
+                    # than reporting a successful cleanup while the
+                    # sensitive plan blob lingers in storage.
+                    blob_name="plans/${{ parameters.workloadName }}-${{ env.key }}-$(Build.BuildId).tfplan"
+
+                    blob_exists="$(az storage blob exists \
+                      --auth-mode login \
+                      --account-name "$(backendStorageAccount)" \
+                      --container-name "$(backendContainer)" \
+                      --name "$blob_name" \
+                      --query exists \
+                      --output tsv)"
+
+                    if [ "$blob_exists" = "true" ]; then
+                      az storage blob delete \
+                        --auth-mode login \
+                        --account-name "$(backendStorageAccount)" \
+                        --container-name "$(backendContainer)" \
+                        --name "$blob_name"
+                    else
+                      echo "Plan blob already removed."
+                    fi

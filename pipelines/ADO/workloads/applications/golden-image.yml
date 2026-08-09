@@ -1,0 +1,102 @@
+# Runs are queued deliberately with the parameters below - never
+# implicitly by pushes or pull requests.
+trigger: none
+pr: none
+
+variables:
+  - group: terraformBackend
+
+parameters:
+  # Environments this run deploys to - any combination can be picked.
+  - name: deployRd
+    displayName: Deploy to RD
+    type: boolean
+    default: true
+
+  - name: deployDev
+    displayName: Deploy to Dev
+    type: boolean
+    default: false
+
+  - name: deployQa
+    displayName: Deploy to QA
+    type: boolean
+    default: false
+
+  - name: deployProduction
+    displayName: Deploy to Production
+    type: boolean
+    default: false
+
+  # Stages each selected environment's chain runs.
+  - name: runValidate
+    displayName: "Stage: Validate"
+    type: boolean
+    default: true
+
+  - name: runPlan
+    displayName: "Stage: Plan"
+    type: boolean
+    default: true
+
+  - name: runSecurityScan
+    displayName: "Stage: Security scan"
+    type: boolean
+    default: true
+
+  - name: runApply
+    displayName: "Stage: Apply (needs Plan)"
+    type: boolean
+    default: true
+
+stages:
+  - template: ../../templates/terraform-deploy.yml
+    parameters:
+      workloadName: golden-image
+
+      terraformRoot: terraform/applications/golden-image
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      agentImage: ubuntu-latest
+      # The plan reads a secret over the platform vault's private data
+      # plane: set agentPoolName to a self-hosted pool inside the
+      # network.
+      # agentPoolName: my-private-pool
+
+      runValidate: ${{ parameters.runValidate }}
+      runPlan: ${{ parameters.runPlan }}
+      runSecurityScan: ${{ parameters.runSecurityScan }}
+      runApply: ${{ parameters.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      environments:
+        rd:
+          deploy: ${{ parameters.deployRd }}
+          serviceConnection: azure-terraform-rd
+          stateKey: golden-image-rd.tfstate
+          azureDevOpsEnvironment: terraform-golden-image-rd
+
+        dev:
+          deploy: ${{ parameters.deployDev }}
+          serviceConnection: azure-terraform-dev
+          stateKey: golden-image-dev.tfstate
+          azureDevOpsEnvironment: terraform-golden-image-dev
+
+        qa:
+          deploy: ${{ parameters.deployQa }}
+          serviceConnection: azure-terraform-qa
+          stateKey: golden-image-qa.tfstate
+          azureDevOpsEnvironment: terraform-golden-image-qa
+
+        production:
+          deploy: ${{ parameters.deployProduction }}
+          serviceConnection: azure-terraform-production
+          stateKey: golden-image-production.tfstate
+          azureDevOpsEnvironment: terraform-golden-image-production

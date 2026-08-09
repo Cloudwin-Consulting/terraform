@@ -1,0 +1,188 @@
+# Runs are started deliberately from the Actions tab with the inputs
+# below - never implicitly by pushes or pull requests (the counterpart
+# of the Azure DevOps pipeline's "trigger: none, pr: none").
+#
+# Each selected environment runs its own independent
+# Validate -> Plan -> Security scan -> Apply chain through the
+# reusable terraform-deploy workflow, and the chains run in parallel.
+# Every environment authenticates with its own AZURE_*_<ENV>
+# repository secrets - the counterpart of the per-environment Azure
+# DevOps service connections - and each apply is gated by the
+# protection rules of its GitHub environment.
+
+name: sql-database
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Environments this run deploys to - any combination can be picked.
+      deployRd:
+        description: Deploy to RD
+        type: boolean
+        default: true
+
+      deployDev:
+        description: Deploy to Dev
+        type: boolean
+        default: false
+
+      deployQa:
+        description: Deploy to QA
+        type: boolean
+        default: false
+
+      deployProduction:
+        description: Deploy to Production
+        type: boolean
+        default: false
+
+      # Stages each selected environment's chain runs.
+      runValidate:
+        description: "Stage: Validate"
+        type: boolean
+        default: true
+
+      runPlan:
+        description: "Stage: Plan"
+        type: boolean
+        default: true
+
+      runSecurityScan:
+        description: "Stage: Security scan"
+        type: boolean
+        default: true
+
+      runApply:
+        description: "Stage: Apply (needs Plan)"
+        type: boolean
+        default: true
+
+jobs:
+  rd:
+    if: ${{ inputs.deployRd }}
+    uses: ./.github/workflows/terraform-deploy.yml
+    with:
+      workloadName: sql-database
+      terraformRoot: terraform/applications/sql-database
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      backendSubscriptionId: ${{ vars.TERRAFORM_BACKEND_SUBSCRIPTION_ID }}
+      backendResourceGroup: ${{ vars.TERRAFORM_BACKEND_RESOURCE_GROUP }}
+      backendStorageAccount: ${{ vars.TERRAFORM_BACKEND_STORAGE_ACCOUNT }}
+      backendContainer: ${{ vars.TERRAFORM_BACKEND_CONTAINER }}
+
+      environmentName: rd
+      stateKey: sql-database-rd.tfstate
+      githubEnvironment: terraform-sql-database-rd
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_RD }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_RD }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_RD }}
+
+  dev:
+    if: ${{ inputs.deployDev }}
+    uses: ./.github/workflows/terraform-deploy.yml
+    with:
+      workloadName: sql-database
+      terraformRoot: terraform/applications/sql-database
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      environmentName: dev
+      stateKey: sql-database-dev.tfstate
+      githubEnvironment: terraform-sql-database-dev
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_DEV }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_DEV }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }}
+
+  qa:
+    if: ${{ inputs.deployQa }}
+    uses: ./.github/workflows/terraform-deploy.yml
+    with:
+      workloadName: sql-database
+      terraformRoot: terraform/applications/sql-database
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      environmentName: qa
+      stateKey: sql-database-qa.tfstate
+      githubEnvironment: terraform-sql-database-qa
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_QA }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_QA }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_QA }}
+
+  production:
+    if: ${{ inputs.deployProduction }}
+    uses: ./.github/workflows/terraform-deploy.yml
+    with:
+      workloadName: sql-database
+      terraformRoot: terraform/applications/sql-database
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      environmentName: production
+      stateKey: sql-database-production.tfstate
+      githubEnvironment: terraform-sql-database-production
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_PRODUCTION }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_PRODUCTION }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_PRODUCTION }}

@@ -1,0 +1,211 @@
+# Runs are started deliberately from the Actions tab with the inputs
+# below - never implicitly by pushes or pull requests (the counterpart
+# of the Azure DevOps pipeline's "trigger: none, pr: none").
+#
+# Each selected environment runs its own independent
+# Validate -> Plan -> Security scan -> Apply chain through the
+# reusable terraform-deploy workflow, and the chains run in parallel.
+# Every environment authenticates with its own AZURE_*_<ENV>
+# repository secrets - the counterpart of the per-environment Azure
+# DevOps service connections - and each apply is gated by the
+# protection rules of its GitHub environment.
+
+name: cms
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Environments this run deploys to - any combination can be picked.
+      deployRd:
+        description: Deploy to RD
+        type: boolean
+        default: true
+
+      deployDev:
+        description: Deploy to Dev
+        type: boolean
+        default: false
+
+      deployQa:
+        description: Deploy to QA
+        type: boolean
+        default: false
+
+      deployProduction:
+        description: Deploy to Production
+        type: boolean
+        default: false
+
+      # Stages each selected environment's chain runs.
+      runValidate:
+        description: "Stage: Validate"
+        type: boolean
+        default: true
+
+      runPlan:
+        description: "Stage: Plan"
+        type: boolean
+        default: true
+
+      runSecurityScan:
+        description: "Stage: Security scan"
+        type: boolean
+        default: true
+
+      runApply:
+        description: "Stage: Apply (needs Plan)"
+        type: boolean
+        default: true
+
+# The plan reads a secret over the platform vault's private data
+# plane: set runsOn to a self-hosted runner label inside the network
+# in every job below, e.g. runsOn: my-private-runner.
+
+# Generated or vault-read secrets live in the Terraform state, and
+# both the unredacted JSON plan and the saved binary plan would expose
+# them to anyone who can read workflow artifacts. Only the readable
+# (redacted) plan is uploaded; the exact reviewed plan reaches the
+# approval-gated apply job through the state storage account instead
+# (publishJsonPlan / publishSavedPlan below).
+
+jobs:
+  rd:
+    if: ${{ inputs.deployRd }}
+    uses: ./.github/workflows/terraform-deploy.yml
+    with:
+      workloadName: cms
+      terraformRoot: terraform/applications/cms
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      backendSubscriptionId: ${{ vars.TERRAFORM_BACKEND_SUBSCRIPTION_ID }}
+      backendResourceGroup: ${{ vars.TERRAFORM_BACKEND_RESOURCE_GROUP }}
+      backendStorageAccount: ${{ vars.TERRAFORM_BACKEND_STORAGE_ACCOUNT }}
+      backendContainer: ${{ vars.TERRAFORM_BACKEND_CONTAINER }}
+
+      environmentName: rd
+      stateKey: cms-rd.tfstate
+      githubEnvironment: terraform-cms-rd
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      publishJsonPlan: false
+      publishSavedPlan: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_RD }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_RD }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_RD }}
+
+  dev:
+    if: ${{ inputs.deployDev }}
+    uses: ./.github/workflows/terraform-deploy.yml
+    with:
+      workloadName: cms
+      terraformRoot: terraform/applications/cms
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      environmentName: dev
+      stateKey: cms-dev.tfstate
+      githubEnvironment: terraform-cms-dev
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      publishJsonPlan: false
+      publishSavedPlan: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_DEV }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_DEV }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }}
+
+  qa:
+    if: ${{ inputs.deployQa }}
+    uses: ./.github/workflows/terraform-deploy.yml
+    with:
+      workloadName: cms
+      terraformRoot: terraform/applications/cms
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      environmentName: qa
+      stateKey: cms-qa.tfstate
+      githubEnvironment: terraform-cms-qa
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      publishJsonPlan: false
+      publishSavedPlan: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_QA }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_QA }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_QA }}
+
+  production:
+    if: ${{ inputs.deployProduction }}
+    uses: ./.github/workflows/terraform-deploy.yml
+    with:
+      workloadName: cms
+      terraformRoot: terraform/applications/cms
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      environmentName: production
+      stateKey: cms-production.tfstate
+      githubEnvironment: terraform-cms-production
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      publishJsonPlan: false
+      publishSavedPlan: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_PRODUCTION }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_PRODUCTION }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_PRODUCTION }}

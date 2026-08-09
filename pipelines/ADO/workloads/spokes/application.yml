@@ -1,0 +1,100 @@
+## Application spoke pipeline
+
+# Runs are queued deliberately with the parameters below - never
+# implicitly by pushes or pull requests.
+trigger: none
+pr: none
+
+variables:
+  - group: terraformBackend
+
+parameters:
+  # Environments this run deploys to - any combination can be picked.
+  - name: deployRd
+    displayName: Deploy to RD
+    type: boolean
+    default: true
+
+  - name: deployDev
+    displayName: Deploy to Dev
+    type: boolean
+    default: false
+
+  - name: deployQa
+    displayName: Deploy to QA
+    type: boolean
+    default: false
+
+  - name: deployProduction
+    displayName: Deploy to Production
+    type: boolean
+    default: false
+
+  # Stages each selected environment's chain runs.
+  - name: runValidate
+    displayName: "Stage: Validate"
+    type: boolean
+    default: true
+
+  - name: runPlan
+    displayName: "Stage: Plan"
+    type: boolean
+    default: true
+
+  - name: runSecurityScan
+    displayName: "Stage: Security scan"
+    type: boolean
+    default: true
+
+  - name: runApply
+    displayName: "Stage: Apply (needs Plan)"
+    type: boolean
+    default: true
+
+stages:
+  - template: ../../templates/terraform-deploy.yml
+    parameters:
+      workloadName: application-spoke
+
+      terraformRoot: terraform/spokes/application
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      agentImage: ubuntu-latest
+
+      runValidate: ${{ parameters.runValidate }}
+      runPlan: ${{ parameters.runPlan }}
+      runSecurityScan: ${{ parameters.runSecurityScan }}
+      runApply: ${{ parameters.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      environments:
+        rd:
+          deploy: ${{ parameters.deployRd }}
+          serviceConnection: azure-terraform-rd
+          stateKey: application-spoke-rd.tfstate
+          azureDevOpsEnvironment: terraform-application-spoke-rd
+
+        dev:
+          deploy: ${{ parameters.deployDev }}
+          serviceConnection: azure-terraform-dev
+          stateKey: application-spoke-dev.tfstate
+          azureDevOpsEnvironment: terraform-application-spoke-dev
+
+        qa:
+          deploy: ${{ parameters.deployQa }}
+          serviceConnection: azure-terraform-qa
+          stateKey: application-spoke-qa.tfstate
+          azureDevOpsEnvironment: terraform-application-spoke-qa
+
+        production:
+          deploy: ${{ parameters.deployProduction }}
+          serviceConnection: azure-terraform-production
+          stateKey: application-spoke-production.tfstate
+          azureDevOpsEnvironment: terraform-application-spoke-production

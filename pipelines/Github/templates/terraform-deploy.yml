@@ -1,0 +1,735 @@
+# Reusable Terraform deployment workflow.
+#
+# The GitHub Actions counterpart of the Azure DevOps stage template in
+# pipelines/ADO/templates/terraform-deploy.yml. One call runs one
+# environment's independent Validate -> Plan -> Security scan -> Apply
+# job chain; the workload workflows call it once per selected
+# environment (guarded by their deploy* inputs), so a single run can
+# target any combination of environments and the chains run in
+# parallel. Which jobs each chain contains is selected at dispatch
+# time through the runValidate / runPlan / runSecurityScan / runApply
+# inputs; each environment's apply is still gated by the protection
+# rules (required reviewers) of its GitHub environment - the
+# counterpart of Azure DevOps environment approvals.
+#
+# Authentication mirrors the per-environment Azure DevOps service
+# connections: the caller passes one set of AZURE_CLIENT_ID /
+# AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID secrets per environment,
+# naming an identity federated to this repository (OIDC - the
+# counterpart of a workload identity federation service connection).
+# Terraform authenticates through ARM_USE_OIDC and the az CLI through
+# azure/login; both need the id-token: write permission on the jobs
+# that touch Azure.
+#
+# NOTE: GitHub only executes workflows stored directly in
+# .github/workflows/, and a same-repository reusable workflow can only
+# be referenced there. Copy this file and the workload workflows into
+# .github/workflows/ (flat - subfolders are not supported).
+#
+# This file deliberately contains no push or pull_request triggers.
+# Runs are only ever started through the workload workflows.
+
+name: Terraform deploy
+
+on:
+  workflow_call:
+
+    inputs:
+
+      # ----------------------------------------------------------
+      # Workload settings
+      # ----------------------------------------------------------
+
+      workloadName:
+        type: string
+        required: true
+
+      terraformRoot:
+        type: string
+        required: true
+
+      tfvarsFolder:
+        type: string
+        default: environments
+
+      terraformVersion:
+        type: string
+        default: '1.13.5'
+
+      # Runner every job runs on. Set a self-hosted runner label
+      # instead of a hosted image for workloads whose plan reads
+      # secrets from a key vault's private data plane - the
+      # counterpart of the Azure DevOps agentPoolName parameter.
+      runsOn:
+        type: string
+        default: ubuntu-latest
+
+      # ----------------------------------------------------------
+      # Backend settings
+      # ----------------------------------------------------------
+
+      backendSubscriptionId:
+        type: string
+        required: true
+
+      backendResourceGroup:
+        type: string
+        required: true
+
+      backendStorageAccount:
+        type: string
+        required: true
+
+      backendContainer:
+        type: string
+        default: tfstate
+
+      # ----------------------------------------------------------
+      # Environment-specific configuration
+      #
+      # One environment per call - the workload workflow calls this
+      # workflow once per selected environment, which replaces the
+      # Azure DevOps template's environments object.
+      # ----------------------------------------------------------
+
+      # The environment key, e.g. rd, dev, qa or production.
+      environmentName:
+        type: string
+        required: true
+
+      stateKey:
+        type: string
+        required: true
+
+      # The GitHub environment gating the apply job. Configure its
+      # protection rules (required reviewers) in the repository
+      # settings to mirror Azure DevOps environment approvals.
+      githubEnvironment:
+        type: string
+        required: true
+
+      # ----------------------------------------------------------
+      # Stage selection
+      # ----------------------------------------------------------
+
+      runValidate:
+        type: boolean
+        default: true
+
+      runPlan:
+        type: boolean
+        default: true
+
+      runSecurityScan:
+        type: boolean
+        default: true
+
+      # Apply needs the plan produced earlier in the same run, so it
+      # only runs when runPlan is also on.
+      runApply:
+        type: boolean
+        default: true
+
+      # ----------------------------------------------------------
+      # Pipeline behaviour
+      # ----------------------------------------------------------
+
+      # When true, security scan findings mark the scan step with a
+      # warning instead of failing it, so the deployment continues
+      # while the findings stay visible in the run. Set false to make
+      # findings fail the job and block the apply.
+      securityScanWarnOnly:
+        type: boolean
+        default: true
+
+      # Trivy version, e.g. latest or v0.58.0.
+      trivyVersion:
+        type: string
+        default: latest
+
+      trivyScanners:
+        type: string
+        default: misconfig,secret
+
+      trivySeverities:
+        type: string
+        default: HIGH,CRITICAL
+
+      trivyExitCode:
+        type: string
+        default: '1'
+
+      checkovVersion:
+        type: string
+        default: latest
+
+      # Extra checkov arguments, e.g. --skip-check CKV_AZURE_1 or
+      # --soft-fail to report without failing the job.
+      checkovAdditionalArgs:
+        type: string
+        default: ''
+
+      # The JSON plan is written unredacted, including values
+      # Terraform normally hides. Disable for workloads whose state
+      # contains generated secrets, e.g. virtual machine passwords.
+      publishJsonPlan:
+        type: boolean
+        default: true
+
+      # The saved binary plan also embeds state values and can be
+      # decoded by anyone who can read workflow artifacts. Disable for
+      # workloads whose state contains generated secrets: no plan
+      # artifacts are uploaded, and the exact reviewed plan is handed
+      # to the approval-gated apply job through the state storage
+      # account instead. The readable plan (which redacts sensitive
+      # values) is still uploaded for review.
+      publishSavedPlan:
+        type: boolean
+        default: true
+
+      applyOnPullRequests:
+        type: boolean
+        default: false
+
+      terraformPlanAdditionalArgs:
+        type: string
+        default: ''
+
+      terraformApplyAdditionalArgs:
+        type: string
+        default: ''
+
+    secrets:
+
+      # Per-environment deployment identity - the counterpart of the
+      # environment's Azure DevOps service connection.
+      AZURE_CLIENT_ID:
+        required: true
+
+      AZURE_TENANT_ID:
+        required: true
+
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+
+
+jobs:
+
+  # ============================================================
+  # VALIDATE
+  # ============================================================
+
+  validate:
+    name: Validate ${{ inputs.workloadName }} (${{ inputs.environmentName }})
+    if: ${{ inputs.runValidate }}
+    runs-on: ${{ inputs.runsOn }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Terraform ${{ inputs.terraformVersion }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraformVersion }}
+          # The wrapper garbles redirected terraform output.
+          terraform_wrapper: false
+
+      - name: Format and validate Terraform
+        working-directory: ${{ github.workspace }}/${{ inputs.terraformRoot }}
+        run: |
+          set -euxo pipefail
+
+          echo "Workload: ${{ inputs.workloadName }}"
+          echo "Environment: ${{ inputs.environmentName }}"
+          echo "Terraform root: ${{ inputs.terraformRoot }}"
+
+          terraform version
+
+          terraform fmt \
+            -check \
+            -recursive
+
+          terraform init \
+            -backend=false \
+            -input=false
+
+          terraform validate
+
+
+  # ============================================================
+  # PLAN
+  # ============================================================
+
+  plan:
+    name: Plan ${{ inputs.workloadName }} (${{ inputs.environmentName }})
+    needs: validate
+
+    # Runs after validate when validate ran, and directly otherwise -
+    # the counterpart of the Azure DevOps stage's conditional
+    # dependsOn. A skipped validate (runValidate off) does not block
+    # the chain; a failed one does.
+    if: >-
+      ${{ !cancelled()
+          && inputs.runPlan
+          && contains(fromJSON('["success", "skipped"]'), needs.validate.result) }}
+
+    runs-on: ${{ inputs.runsOn }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      ARM_USE_OIDC: 'true'
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Terraform ${{ inputs.terraformVersion }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraformVersion }}
+          terraform_wrapper: false
+
+      - name: Show resolved deployment settings
+        run: |
+          set -euo pipefail
+
+          echo "Workload: ${{ inputs.workloadName }}"
+          echo "Environment: ${{ inputs.environmentName }}"
+          echo "Terraform root: ${{ inputs.terraformRoot }}"
+          echo "State key: ${{ inputs.stateKey }}"
+          echo "GitHub environment: ${{ inputs.githubEnvironment }}"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create Terraform plan
+        working-directory: ${{ github.workspace }}/${{ inputs.terraformRoot }}
+        run: |
+          set -euxo pipefail
+
+          # When the plan is handed over via the state storage account
+          # it must never survive this step, whatever fails below - on
+          # a self-hosted runner a leftover unredacted plan would be
+          # readable by later jobs.
+          if [ "${{ inputs.publishSavedPlan }}" = "false" ]; then
+            trap 'rm -f tfplan' EXIT
+          fi
+
+          echo "Authenticated Azure context:"
+
+          az account show \
+            --query '{
+              subscriptionName:name,
+              subscriptionId:id,
+              tenantId:tenantId
+            }' \
+            --output table
+
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="subscription_id=${{ inputs.backendSubscriptionId }}" \
+            -backend-config="resource_group_name=${{ inputs.backendResourceGroup }}" \
+            -backend-config="storage_account_name=${{ inputs.backendStorageAccount }}" \
+            -backend-config="container_name=${{ inputs.backendContainer }}" \
+            -backend-config="key=${{ inputs.stateKey }}" \
+            -backend-config="use_azuread_auth=true"
+
+          terraform plan \
+            -input=false \
+            -lock-timeout=5m \
+            -var-file="${{ inputs.tfvarsFolder }}/${{ inputs.environmentName }}.tfvars" \
+            ${{ inputs.terraformPlanAdditionalArgs }} \
+            -out=tfplan
+
+          terraform show \
+            tfplan \
+            > tfplan.txt
+
+          # The JSON plan is unredacted, so it is only ever written
+          # when it is going to be uploaded.
+          if [ "${{ inputs.publishJsonPlan }}" = "true" ] \
+            && [ "${{ inputs.publishSavedPlan }}" = "true" ]; then
+            terraform show \
+              -json \
+              tfplan \
+              > tfplan.json
+          fi
+
+          # Without uploaded plan artifacts, hand the exact plan to
+          # the apply job through the state storage account, which is
+          # already access-controlled and Entra authenticated. Only
+          # uploaded when this run includes an apply; the cleanup job
+          # removes it afterwards whatever the apply's outcome, and
+          # the EXIT trap above removes the local copy so it cannot
+          # linger in a self-hosted runner's workspace.
+          if [ "${{ inputs.publishSavedPlan }}" = "false" ]; then
+            if [ "${{ inputs.runApply }}" = "true" ]; then
+              az storage blob upload \
+                --auth-mode login \
+                --overwrite \
+                --account-name "${{ inputs.backendStorageAccount }}" \
+                --container-name "${{ inputs.backendContainer }}" \
+                --name "plans/${{ inputs.workloadName }}-${{ inputs.environmentName }}-${{ github.run_id }}.tfplan" \
+                --file tfplan
+            fi
+          fi
+
+      # Artifacts are immutable within a run, and a re-run attempt
+      # keeps the previous attempt's artifacts - overwrite lets the
+      # re-run replace them instead of failing the upload.
+      - name: Publish saved Terraform plan
+        if: ${{ inputs.publishSavedPlan }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.workloadName }}-${{ inputs.environmentName }}
+          path: ${{ github.workspace }}/${{ inputs.terraformRoot }}/tfplan
+          overwrite: true
+
+      - name: Publish readable Terraform plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-readable-${{ inputs.workloadName }}-${{ inputs.environmentName }}
+          path: ${{ github.workspace }}/${{ inputs.terraformRoot }}/tfplan.txt
+          overwrite: true
+
+      - name: Publish JSON Terraform plan
+        if: ${{ inputs.publishJsonPlan && inputs.publishSavedPlan }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-json-${{ inputs.workloadName }}-${{ inputs.environmentName }}
+          path: ${{ github.workspace }}/${{ inputs.terraformRoot }}/tfplan.json
+          overwrite: true
+
+
+  # ============================================================
+  # SECURITY
+  #
+  # Trivy and Checkov scan the same configuration in parallel
+  # jobs. With securityScanWarnOnly on (the default) findings mark
+  # the scan step with a warning and the run continues; otherwise
+  # the job fails if either scanner finds a problem.
+  #
+  # The jobs run after whichever of validate and plan ran - the
+  # counterpart of the Azure DevOps stage's conditional dependsOn -
+  # and are blocked by a failure in either.
+  # ============================================================
+
+  trivy:
+    name: Trivy IaC scan ${{ inputs.workloadName }} (${{ inputs.environmentName }})
+    needs:
+      - validate
+      - plan
+
+    if: >-
+      ${{ !cancelled()
+          && inputs.runSecurityScan
+          && !contains(needs.*.result, 'failure')
+          && !contains(needs.*.result, 'cancelled') }}
+
+    runs-on: ${{ inputs.runsOn }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Trivy ${{ inputs.trivyVersion }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ inputs.trivyVersion }}" = "latest" ]; then
+            curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+              | sh -s -- -b "$HOME/.local/bin"
+          else
+            version="${{ inputs.trivyVersion }}"
+            curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+              | sh -s -- -b "$HOME/.local/bin" "v${version#v}"
+          fi
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run Trivy IaC scan
+        id: scan
+        continue-on-error: ${{ inputs.securityScanWarnOnly }}
+        run: |
+          set -euo pipefail
+
+          trivy --version
+
+          trivy fs \
+            --scanners "${{ inputs.trivyScanners }}" \
+            --severity "${{ inputs.trivySeverities }}" \
+            --exit-code "${{ inputs.trivyExitCode }}" \
+            "${{ github.workspace }}/${{ inputs.terraformRoot }}"
+
+      - name: Flag scan findings as a warning
+        if: ${{ steps.scan.outcome == 'failure' }}
+        run: >-
+          echo "::warning::Trivy found issues in
+          ${{ inputs.workloadName }} (${{ inputs.environmentName }}) -
+          see the 'Run Trivy IaC scan' step for the report."
+
+  checkov:
+    name: Checkov IaC scan ${{ inputs.workloadName }} (${{ inputs.environmentName }})
+    needs:
+      - validate
+      - plan
+
+    if: >-
+      ${{ !cancelled()
+          && inputs.runSecurityScan
+          && !contains(needs.*.result, 'failure')
+          && !contains(needs.*.result, 'cancelled') }}
+
+    runs-on: ${{ inputs.runsOn }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Checkov ${{ inputs.checkovVersion }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ inputs.checkovVersion }}" = "latest" ]; then
+            pip3 install --quiet --user checkov
+          else
+            pip3 install --quiet --user "checkov==${{ inputs.checkovVersion }}"
+          fi
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Only the scan itself may warn instead of fail - installation
+      # problems above always fail the job, so an apply can never
+      # proceed just because the scanner failed to run at all.
+      - name: Run Checkov IaC scan
+        id: scan
+        continue-on-error: ${{ inputs.securityScanWarnOnly }}
+        run: |
+          set -euo pipefail
+
+          checkov --version
+
+          checkov \
+            --directory "${{ github.workspace }}/${{ inputs.terraformRoot }}" \
+            --framework terraform \
+            --download-external-modules false \
+            --compact \
+            ${{ inputs.checkovAdditionalArgs }}
+
+      - name: Flag scan findings as a warning
+        if: ${{ steps.scan.outcome == 'failure' }}
+        run: >-
+          echo "::warning::Checkov found failed checks in
+          ${{ inputs.workloadName }} (${{ inputs.environmentName }}) -
+          see the 'Run Checkov IaC scan' step for the report."
+
+
+  # ============================================================
+  # APPLY
+  #
+  # Applies the plan produced earlier in this run, so it only runs
+  # when the plan job ran too. The job's GitHub environment carries
+  # the approval gate.
+  # ============================================================
+
+  apply:
+    name: Apply ${{ inputs.workloadName }} (${{ inputs.environmentName }})
+    needs:
+      - plan
+      - trivy
+      - checkov
+
+    # The scan jobs may be skipped (runSecurityScan off) but must not
+    # have failed - with securityScanWarnOnly on, findings do not fail
+    # them, so the apply still runs. The pull request guard mirrors
+    # the Azure DevOps applyOnPullRequests condition; runs dispatched
+    # from the Actions tab always pass it.
+    if: >-
+      ${{ !cancelled()
+          && inputs.runApply
+          && inputs.runPlan
+          && needs.plan.result == 'success'
+          && !contains(needs.*.result, 'failure')
+          && !contains(needs.*.result, 'cancelled')
+          && (inputs.applyOnPullRequests || github.event_name != 'pull_request') }}
+
+    runs-on: ${{ inputs.runsOn }}
+
+    environment: ${{ inputs.githubEnvironment }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      ARM_USE_OIDC: 'true'
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download saved Terraform plan
+        if: ${{ inputs.publishSavedPlan }}
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.workloadName }}-${{ inputs.environmentName }}
+          path: ${{ github.workspace }}/${{ inputs.terraformRoot }}
+
+      - name: Install Terraform ${{ inputs.terraformVersion }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraformVersion }}
+          terraform_wrapper: false
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Apply saved Terraform plan
+        if: ${{ inputs.publishSavedPlan }}
+        working-directory: ${{ github.workspace }}/${{ inputs.terraformRoot }}
+        run: |
+          set -euxo pipefail
+
+          # Whatever happens below, the plan must not survive this
+          # step in a self-hosted runner's workspace.
+          trap 'rm -f tfplan' EXIT
+
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="subscription_id=${{ inputs.backendSubscriptionId }}" \
+            -backend-config="resource_group_name=${{ inputs.backendResourceGroup }}" \
+            -backend-config="storage_account_name=${{ inputs.backendStorageAccount }}" \
+            -backend-config="container_name=${{ inputs.backendContainer }}" \
+            -backend-config="key=${{ inputs.stateKey }}" \
+            -backend-config="use_azuread_auth=true"
+
+          terraform apply \
+            -input=false \
+            -lock-timeout=5m \
+            ${{ inputs.terraformApplyAdditionalArgs }} \
+            tfplan
+
+      # Without uploaded plan artifacts, the exact reviewed plan is
+      # retrieved from the state storage account, so the approval
+      # still gates precisely what gets applied while the plan stays
+      # out of workflow artifacts.
+      - name: Apply Terraform plan from state storage
+        if: ${{ !inputs.publishSavedPlan }}
+        working-directory: ${{ github.workspace }}/${{ inputs.terraformRoot }}
+        run: |
+          set -euxo pipefail
+
+          # Whatever happens below, the plan must not survive this
+          # step in a self-hosted runner's workspace.
+          trap 'rm -f tfplan' EXIT
+
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="subscription_id=${{ inputs.backendSubscriptionId }}" \
+            -backend-config="resource_group_name=${{ inputs.backendResourceGroup }}" \
+            -backend-config="storage_account_name=${{ inputs.backendStorageAccount }}" \
+            -backend-config="container_name=${{ inputs.backendContainer }}" \
+            -backend-config="key=${{ inputs.stateKey }}" \
+            -backend-config="use_azuread_auth=true"
+
+          az storage blob download \
+            --auth-mode login \
+            --account-name "${{ inputs.backendStorageAccount }}" \
+            --container-name "${{ inputs.backendContainer }}" \
+            --name "plans/${{ inputs.workloadName }}-${{ inputs.environmentName }}-${{ github.run_id }}.tfplan" \
+            --file tfplan
+
+          terraform apply \
+            -input=false \
+            -lock-timeout=5m \
+            ${{ inputs.terraformApplyAdditionalArgs }} \
+            tfplan
+
+          az storage blob delete \
+            --auth-mode login \
+            --account-name "${{ inputs.backendStorageAccount }}" \
+            --container-name "${{ inputs.backendContainer }}" \
+            --name "plans/${{ inputs.workloadName }}-${{ inputs.environmentName }}-${{ github.run_id }}.tfplan"
+
+
+  # ============================================================
+  # CLEANUP
+  #
+  # The plan blob uploaded to the state storage account contains
+  # sensitive values, and the apply job only removes it after a
+  # successful apply. This finalizer always runs - after a failed
+  # scan, a rejected or timed-out approval, a cancelled run or a
+  # failed apply - so the blob never outlives its run.
+  # ============================================================
+
+  cleanup:
+    name: Clean up plan ${{ inputs.workloadName }} (${{ inputs.environmentName }})
+    needs:
+      - plan
+      - apply
+
+    if: >-
+      ${{ always()
+          && !inputs.publishSavedPlan
+          && inputs.runApply
+          && inputs.runPlan }}
+
+    runs-on: ${{ inputs.runsOn }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Delete plan blob
+        run: |
+          set -euo pipefail
+
+          # The apply job already deletes the blob after a successful
+          # apply, so it may legitimately be gone - only that confirmed
+          # not-found case is ignored. Any other failure (authentication,
+          # authorisation, transient storage errors) fails the job
+          # rather than reporting a successful cleanup while the
+          # sensitive plan blob lingers in storage.
+          blob_name="plans/${{ inputs.workloadName }}-${{ inputs.environmentName }}-${{ github.run_id }}.tfplan"
+
+          blob_exists="$(az storage blob exists \
+            --auth-mode login \
+            --account-name "${{ inputs.backendStorageAccount }}" \
+            --container-name "${{ inputs.backendContainer }}" \
+            --name "$blob_name" \
+            --query exists \
+            --output tsv)"
+
+          if [ "$blob_exists" = "true" ]; then
+            az storage blob delete \
+              --auth-mode login \
+              --account-name "${{ inputs.backendStorageAccount }}" \
+              --container-name "${{ inputs.backendContainer }}" \
+              --name "$blob_name"
+          else
+            echo "Plan blob already removed."
+          fi
