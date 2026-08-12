@@ -22,6 +22,17 @@ variable "location" {
   type        = string
 }
 
+variable "account_kind" {
+  description = "The kind of the storage account. Defaults to StorageV2 (general purpose v2)."
+  type        = string
+  default     = "StorageV2"
+
+  validation {
+    condition     = contains(["Storage", "StorageV2", "BlobStorage", "FileStorage", "BlockBlobStorage"], var.account_kind)
+    error_message = "account_kind must be one of Storage, StorageV2, BlobStorage, FileStorage or BlockBlobStorage."
+  }
+}
+
 variable "account_tier" {
   description = "The performance tier of the storage account."
   type        = string
