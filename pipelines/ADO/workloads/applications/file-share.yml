@@ -1,0 +1,113 @@
+# Runs are queued deliberately with the parameters below - never
+# implicitly by pushes or pull requests.
+trigger: none
+pr: none
+
+variables:
+  - group: terraformBackend
+
+parameters:
+  # Environments this run deploys to - any combination can be picked.
+  - name: deployRd
+    displayName: Deploy to RD
+    type: boolean
+    default: true
+
+  - name: deployDev
+    displayName: Deploy to Dev
+    type: boolean
+    default: false
+
+  - name: deployQa
+    displayName: Deploy to QA
+    type: boolean
+    default: false
+
+  - name: deployProduction
+    displayName: Deploy to Production
+    type: boolean
+    default: false
+
+  # Stages each selected environment's chain runs.
+  - name: runValidate
+    displayName: "Stage: Validate"
+    type: boolean
+    default: true
+
+  - name: runPlan
+    displayName: "Stage: Plan"
+    type: boolean
+    default: true
+
+  - name: runSecurityScan
+    displayName: "Stage: Security scan"
+    type: boolean
+    default: true
+
+  - name: runApply
+    displayName: "Stage: Apply (needs Plan)"
+    type: boolean
+    default: true
+
+stages:
+  - template: ../../templates/terraform-deploy.yml
+    parameters:
+      workloadName: file-share
+
+      terraformRoot: terraform/applications/file-share
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      agentImage: ubuntu-latest
+      # When admin_password_key_vault_secret is used, the plan reads the
+      # password over the platform vault's private data plane: set
+      # agentPoolName to a self-hosted pool inside the network.
+      # agentPoolName: my-private-pool
+
+      runValidate: ${{ parameters.runValidate }}
+      runPlan: ${{ parameters.runPlan }}
+      runSecurityScan: ${{ parameters.runSecurityScan }}
+      runApply: ${{ parameters.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      # The generated admin passwords live in the Terraform state, as
+      # does the storage account key the machines mount the share with
+      # while identity-based authentication is off, and both the
+      # unredacted JSON plan and the saved binary plan would expose
+      # them to anyone who can read pipeline artifacts. Only the
+      # readable plan (which redacts sensitive values) is published;
+      # the exact reviewed plan reaches the approval-gated apply job
+      # through the access-controlled state storage account instead.
+      publishJsonPlan: false
+      publishSavedPlan: false
+
+      applyOnPullRequests: false
+
+      environments:
+        rd:
+          deploy: ${{ parameters.deployRd }}
+          serviceConnection: azure-terraform-rd
+          stateKey: file-share-rd.tfstate
+          azureDevOpsEnvironment: terraform-file-share-rd
+
+        dev:
+          deploy: ${{ parameters.deployDev }}
+          serviceConnection: azure-terraform-dev
+          stateKey: file-share-dev.tfstate
+          azureDevOpsEnvironment: terraform-file-share-dev
+
+        qa:
+          deploy: ${{ parameters.deployQa }}
+          serviceConnection: azure-terraform-qa
+          stateKey: file-share-qa.tfstate
+          azureDevOpsEnvironment: terraform-file-share-qa
+
+        production:
+          deploy: ${{ parameters.deployProduction }}
+          serviceConnection: azure-terraform-production
+          stateKey: file-share-production.tfstate
+          azureDevOpsEnvironment: terraform-file-share-production
