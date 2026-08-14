@@ -1,0 +1,253 @@
+# Example: calling the reusable workflow when it lives in ANOTHER
+# repository.
+#
+# This is pipelines/Github/workloads/applications/standalone-app.yml
+# with one change - the `uses:` reference on each of the four jobs -
+# kept here as a worked example rather than as a workflow to dispatch.
+# Every `with:` and `secrets:` block below is untouched, which is the
+# point: moving the workflow out does not change how it is configured.
+#
+# Same-repository form, used by the workload workflows:
+#
+#   uses: ./.github/workflows/terraform-deploy.yml
+#
+# Cross-repository form, used below:
+#
+#   uses: <owner>/<repo>/.github/workflows/terraform-deploy.yml@<ref>
+#
+# Differences worth knowing:
+#
+#   1. The ref is mandatory. A cross-repository reference must pin a
+#      branch, tag or full commit SHA - there is no "default branch"
+#      shorthand. Prefer a tag or SHA, or a change in the template
+#      repository lands in every consumer's next run without review.
+#
+#   2. The path is the full path from the template repository's root
+#      and the file must sit directly in its .github/workflows/ -
+#      subfolders are not resolvable, cross-repo or not.
+#
+#   3. Secrets do not cross the repository boundary. The explicit
+#      `secrets:` mapping on each job below is what makes this work;
+#      `secrets: inherit` would forward the caller's whole set instead.
+#      A private or internal template repository must also allow the
+#      consuming repositories under Settings -> Actions -> Access.
+#
+# actions/checkout inside the reusable workflow still checks out THIS
+# repository, so terraformRoot keeps resolving against this
+# repository's Terraform code.
+
+name: standalone-app (cross-repo template)
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Environments this run deploys to - any combination can be picked.
+      deployRd:
+        description: Deploy to RD
+        type: boolean
+        default: true
+
+      deployDev:
+        description: Deploy to Dev
+        type: boolean
+        default: false
+
+      deployQa:
+        description: Deploy to QA
+        type: boolean
+        default: false
+
+      deployProduction:
+        description: Deploy to Production
+        type: boolean
+        default: false
+
+      # Stages each selected environment's chain runs.
+      runValidate:
+        description: "Stage: Validate"
+        type: boolean
+        default: true
+
+      runPlan:
+        description: "Stage: Plan"
+        type: boolean
+        default: true
+
+      runSecurityScan:
+        description: "Stage: Security scan"
+        type: boolean
+        default: true
+
+      runApply:
+        description: "Stage: Apply (needs Plan)"
+        type: boolean
+        default: true
+
+# The stack deploys its own network, DNS zones and monitoring into one
+# subscription and looks nothing up in a hub or spoke, so a hosted
+# runner is enough: nothing in the plan reads a private data plane.
+
+# The generated Windows admin passwords live in the Terraform state,
+# and both the unredacted JSON plan and the saved binary plan would
+# expose them to anyone who can read workflow artifacts. Only the
+# readable plan (which redacts sensitive values) is uploaded; the exact
+# reviewed plan reaches the approval-gated apply job through the
+# access-controlled state storage account instead (publishJsonPlan /
+# publishSavedPlan below).
+
+jobs:
+  rd:
+    if: ${{ inputs.deployRd }}
+    uses: Cloudwin-Consulting/pipeline-templates/.github/workflows/terraform-deploy.yml@v1
+    with:
+      workloadName: standalone-app
+      terraformRoot: terraform/applications/standalone-app
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      backendSubscriptionId: ${{ vars.TERRAFORM_BACKEND_SUBSCRIPTION_ID }}
+      backendResourceGroup: ${{ vars.TERRAFORM_BACKEND_RESOURCE_GROUP }}
+      backendStorageAccount: ${{ vars.TERRAFORM_BACKEND_STORAGE_ACCOUNT }}
+      backendContainer: ${{ vars.TERRAFORM_BACKEND_CONTAINER }}
+
+      environmentName: rd
+      stateKey: standalone-app-rd.tfstate
+      githubEnvironment: terraform-standalone-app-rd
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      publishJsonPlan: false
+      publishSavedPlan: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_RD }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_RD }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_RD }}
+
+  dev:
+    if: ${{ inputs.deployDev }}
+    uses: Cloudwin-Consulting/pipeline-templates/.github/workflows/terraform-deploy.yml@v1
+    with:
+      workloadName: standalone-app
+      terraformRoot: terraform/applications/standalone-app
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      backendSubscriptionId: ${{ vars.TERRAFORM_BACKEND_SUBSCRIPTION_ID }}
+      backendResourceGroup: ${{ vars.TERRAFORM_BACKEND_RESOURCE_GROUP }}
+      backendStorageAccount: ${{ vars.TERRAFORM_BACKEND_STORAGE_ACCOUNT }}
+      backendContainer: ${{ vars.TERRAFORM_BACKEND_CONTAINER }}
+
+      environmentName: dev
+      stateKey: standalone-app-dev.tfstate
+      githubEnvironment: terraform-standalone-app-dev
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      publishJsonPlan: false
+      publishSavedPlan: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_DEV }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_DEV }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }}
+
+  qa:
+    if: ${{ inputs.deployQa }}
+    uses: Cloudwin-Consulting/pipeline-templates/.github/workflows/terraform-deploy.yml@v1
+    with:
+      workloadName: standalone-app
+      terraformRoot: terraform/applications/standalone-app
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      backendSubscriptionId: ${{ vars.TERRAFORM_BACKEND_SUBSCRIPTION_ID }}
+      backendResourceGroup: ${{ vars.TERRAFORM_BACKEND_RESOURCE_GROUP }}
+      backendStorageAccount: ${{ vars.TERRAFORM_BACKEND_STORAGE_ACCOUNT }}
+      backendContainer: ${{ vars.TERRAFORM_BACKEND_CONTAINER }}
+
+      environmentName: qa
+      stateKey: standalone-app-qa.tfstate
+      githubEnvironment: terraform-standalone-app-qa
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      publishJsonPlan: false
+      publishSavedPlan: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_QA }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_QA }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_QA }}
+
+  production:
+    if: ${{ inputs.deployProduction }}
+    uses: Cloudwin-Consulting/pipeline-templates/.github/workflows/terraform-deploy.yml@v1
+    with:
+      workloadName: standalone-app
+      terraformRoot: terraform/applications/standalone-app
+      tfvarsFolder: environments
+
+      terraformVersion: "1.15.8"
+      runsOn: ubuntu-latest
+
+      backendSubscriptionId: ${{ vars.TERRAFORM_BACKEND_SUBSCRIPTION_ID }}
+      backendResourceGroup: ${{ vars.TERRAFORM_BACKEND_RESOURCE_GROUP }}
+      backendStorageAccount: ${{ vars.TERRAFORM_BACKEND_STORAGE_ACCOUNT }}
+      backendContainer: ${{ vars.TERRAFORM_BACKEND_CONTAINER }}
+
+      environmentName: production
+      stateKey: standalone-app-production.tfstate
+      githubEnvironment: terraform-standalone-app-production
+
+      runValidate: ${{ inputs.runValidate }}
+      runPlan: ${{ inputs.runPlan }}
+      runSecurityScan: ${{ inputs.runSecurityScan }}
+      runApply: ${{ inputs.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      applyOnPullRequests: false
+
+      publishJsonPlan: false
+      publishSavedPlan: false
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_PRODUCTION }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID_PRODUCTION }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_PRODUCTION }}

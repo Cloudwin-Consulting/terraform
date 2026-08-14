@@ -1,0 +1,173 @@
+# Example: calling the main template when it lives in ANOTHER repository.
+#
+# This is pipelines/ADO/workloads/applications/standalone-app.yml with
+# one change - the template reference - kept here as a worked example
+# rather than as a pipeline to queue. Everything below the `template:`
+# line is identical to the in-repo caller, which is the point: moving
+# the template out does not change how it is configured.
+#
+# Three things catch people out:
+#
+#   1. The path is relative to the root of the TEMPLATE repository, not
+#      to this file. The in-repo form `../../templates/terraform-deploy.yml`
+#      has no cross-repo equivalent - relative traversal from the caller
+#      is meaningless once the template is somewhere else.
+#
+#   2. The `@pipelineTemplates` suffix must match the `repository:`
+#      alias declared under resources exactly. (`@self` is the explicit
+#      form of "this repository", which is what an unsuffixed reference
+#      means.)
+#
+#   3. The first run of a pipeline that references a new repository
+#      resource waits for authorisation - someone with permission on
+#      the template repository has to approve the access before the run
+#      will start. It is not a failure, but it does block unattended
+#      first runs.
+#
+# Templates are resolved at compile time, so `ref` decides which
+# version of the template a run expands - pin a tag rather than
+# tracking a branch, or a template change lands in every consumer's
+# next run without review.
+
+# Runs are queued deliberately with the parameters below - never
+# implicitly by pushes or pull requests.
+trigger: none
+pr: none
+
+resources:
+  repositories:
+    - repository: pipelineTemplates
+      # `git` is Azure Repos within the same organisation. A template
+      # repository on GitHub instead needs `type: github`, plus
+      # `endpoint: <GitHub service connection>` and the full
+      # `<owner>/<repo>` name.
+      type: git
+      name: Platform/pipeline-templates
+      ref: refs/tags/v1.0.0
+
+variables:
+  - group: terraformBackend
+
+parameters:
+  # Environments this run deploys to - any combination can be picked.
+  - name: deployRd
+    displayName: Deploy to RD
+    type: boolean
+    default: true
+
+  - name: deployDev
+    displayName: Deploy to Dev
+    type: boolean
+    default: false
+
+  - name: deployQa
+    displayName: Deploy to QA
+    type: boolean
+    default: false
+
+  - name: deployProduction
+    displayName: Deploy to Production
+    type: boolean
+    default: false
+
+  # Stages each selected environment's chain runs.
+  - name: runValidate
+    displayName: "Stage: Validate"
+    type: boolean
+    default: true
+
+  - name: runPlan
+    displayName: "Stage: Plan"
+    type: boolean
+    default: true
+
+  - name: runSecurityScan
+    displayName: "Stage: Security scan"
+    type: boolean
+    default: true
+
+  - name: runApply
+    displayName: "Stage: Apply (needs Plan)"
+    type: boolean
+    default: true
+
+stages:
+  # The cross-repo reference: path from the template repository's root,
+  # suffixed with the repository resource alias declared above.
+  - template: pipelines/ADO/templates/terraform-deploy.yml@pipelineTemplates
+    parameters:
+      workloadName: standalone-app
+
+      terraformRoot: terraform/applications/standalone-app
+      tfvarsFolder: environments
+
+      # The template checks out `self` - THIS repository, not the one
+      # holding the template - so terraformRoot still resolves against
+      # this repository's Terraform code. Stated explicitly here only
+      # because it is the question everyone asks; `self` is the default
+      # and can be left out.
+      checkoutRepository: self
+
+      # Passed explicitly rather than relying on the defaults, which
+      # read $(backendSubscriptionId) and friends off the variable
+      # group above. A consuming repository whose variable group uses
+      # different names points these at its own variables instead - the
+      # contract is visible here rather than hidden in the template.
+      backendSubscriptionId: $(backendSubscriptionId)
+      backendResourceGroup: $(backendResourceGroup)
+      backendStorageAccount: $(backendStorageAccount)
+      backendContainer: $(backendContainer)
+
+      terraformVersion: "1.15.8"
+      # The stack deploys its own network, DNS zones and monitoring
+      # into one subscription and looks nothing up in a hub or spoke,
+      # so a hosted agent is enough: nothing in the plan reads a
+      # private data plane.
+      agentImage: ubuntu-latest
+
+      runValidate: ${{ parameters.runValidate }}
+      runPlan: ${{ parameters.runPlan }}
+      runSecurityScan: ${{ parameters.runSecurityScan }}
+      runApply: ${{ parameters.runApply }}
+
+      trivyVersion: latest
+      trivyScanners: misconfig,secret
+      trivySeverities: HIGH,CRITICAL
+      trivyExitCode: "1"
+
+      # The generated Windows admin passwords live in the Terraform
+      # state, and both the unredacted JSON plan and the saved binary
+      # plan would expose them to anyone who can read pipeline
+      # artifacts. Only the readable plan (which redacts sensitive
+      # values) is published; the exact reviewed plan reaches the
+      # approval-gated apply job through the access-controlled state
+      # storage account instead.
+      publishJsonPlan: false
+      publishSavedPlan: false
+
+      applyOnPullRequests: false
+
+      environments:
+        rd:
+          deploy: ${{ parameters.deployRd }}
+          serviceConnection: azure-terraform-rd
+          stateKey: standalone-app-rd.tfstate
+          azureDevOpsEnvironment: terraform-standalone-app-rd
+
+        dev:
+          deploy: ${{ parameters.deployDev }}
+          serviceConnection: azure-terraform-dev
+          stateKey: standalone-app-dev.tfstate
+          azureDevOpsEnvironment: terraform-standalone-app-dev
+
+        qa:
+          deploy: ${{ parameters.deployQa }}
+          serviceConnection: azure-terraform-qa
+          stateKey: standalone-app-qa.tfstate
+          azureDevOpsEnvironment: terraform-standalone-app-qa
+
+        production:
+          deploy: ${{ parameters.deployProduction }}
+          serviceConnection: azure-terraform-production
+          stateKey: standalone-app-production.tfstate
+          azureDevOpsEnvironment: terraform-standalone-app-production

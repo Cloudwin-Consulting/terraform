@@ -11,6 +11,30 @@
 #
 # This file deliberately contains no trigger or pr configuration.
 # Those belong in the top-level pipeline file.
+#
+# The template can live in this repository or in a shared template
+# repository. Callers in another repository declare it as a repository
+# resource and suffix the reference with that resource's alias:
+#
+#   resources:
+#     repositories:
+#       - repository: pipelineTemplates
+#         type: git
+#         name: Platform/pipeline-templates
+#         ref: refs/tags/v1.0.0
+#
+#   stages:
+#     - template: pipelines/ADO/templates/terraform-deploy.yml@pipelineTemplates
+#
+# The path in a cross-repo reference is relative to the root of the
+# template repository, not the caller. Declaring the resource does not
+# check it out: the checkout steps below take checkoutRepository, which
+# defaults to `self` - the calling pipeline's own repository - so
+# terraformRoot keeps resolving against the workload's code wherever
+# the template itself is hosted.
+#
+# See pipelines/ADO/examples/cross-repo-standalone-app.yml for a
+# complete caller.
 
 parameters:
 
@@ -42,6 +66,55 @@ parameters:
   - name: agentPoolName
     type: string
     default: ''
+
+  # ----------------------------------------------------------
+  # Backend storage
+  #
+  # These were previously read straight off the caller's variables as
+  # $(backendSubscriptionId) and friends, an undeclared dependency on
+  # the caller setting `variables: - group: terraformBackend` with
+  # exactly those names. The defaults below preserve that behaviour, so
+  # callers already using the variable group need no change - but a
+  # caller in another repository can now pass its own values, or its
+  # own variable names, instead of having to reproduce the group.
+  # ----------------------------------------------------------
+
+  - name: backendSubscriptionId
+    type: string
+    default: '$(backendSubscriptionId)'
+
+  - name: backendResourceGroup
+    type: string
+    default: '$(backendResourceGroup)'
+
+  - name: backendStorageAccount
+    type: string
+    default: '$(backendStorageAccount)'
+
+  - name: backendContainer
+    type: string
+    default: '$(backendContainer)'
+
+  # ----------------------------------------------------------
+  # Source layout
+  # ----------------------------------------------------------
+
+  # Repository holding the workload's Terraform code. `self` is the
+  # calling pipeline's own repository, which stays correct when the
+  # template is consumed from a shared template repository. Name a
+  # repository resource alias instead to deploy code that lives in a
+  # third repository.
+  - name: checkoutRepository
+    type: string
+    default: self
+
+  # Directory the above is checked out into. Only needs overriding when
+  # the caller checks out more than one repository, as Azure DevOps
+  # then nests each repository in its own subfolder rather than placing
+  # a single one at the root of the sources directory.
+  - name: sourcesDirectory
+    type: string
+    default: '$(Build.SourcesDirectory)'
 
   # ----------------------------------------------------------
   # Environment-specific configuration
@@ -180,7 +253,7 @@ stages:
                 vmImage: ${{ parameters.agentImage }}
 
             steps:
-              - checkout: self
+              - checkout: ${{ parameters.checkoutRepository }}
 
               - task: TerraformInstaller@1
                 displayName: 'Install Terraform ${{ parameters.terraformVersion }}'
@@ -206,7 +279,7 @@ stages:
 
                   terraform validate
                 workingDirectory: >-
-                  $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+                  ${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}
                 displayName: 'Format and validate Terraform'
 
 
@@ -238,7 +311,7 @@ stages:
                 vmImage: ${{ parameters.agentImage }}
 
             steps:
-              - checkout: self
+              - checkout: ${{ parameters.checkoutRepository }}
 
               - task: TerraformInstaller@1
                 displayName: 'Install Terraform ${{ parameters.terraformVersion }}'
@@ -269,7 +342,7 @@ stages:
                   addSpnToEnvironment: true
 
                   workingDirectory: >-
-                    $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+                    ${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}
 
                   inlineScript: |
                     set -euxo pipefail
@@ -310,10 +383,10 @@ stages:
                     terraform init \
                       -input=false \
                       -reconfigure \
-                      -backend-config="subscription_id=$(backendSubscriptionId)" \
-                      -backend-config="resource_group_name=$(backendResourceGroup)" \
-                      -backend-config="storage_account_name=$(backendStorageAccount)" \
-                      -backend-config="container_name=$(backendContainer)" \
+                      -backend-config="subscription_id=${{ parameters.backendSubscriptionId }}" \
+                      -backend-config="resource_group_name=${{ parameters.backendResourceGroup }}" \
+                      -backend-config="storage_account_name=${{ parameters.backendStorageAccount }}" \
+                      -backend-config="container_name=${{ parameters.backendContainer }}" \
                       -backend-config="key=${{ env.value.stateKey }}" \
                       -backend-config="use_azuread_auth=true"
 
@@ -351,8 +424,8 @@ stages:
                         az storage blob upload \
                           --auth-mode login \
                           --overwrite \
-                          --account-name "$(backendStorageAccount)" \
-                          --container-name "$(backendContainer)" \
+                          --account-name "${{ parameters.backendStorageAccount }}" \
+                          --container-name "${{ parameters.backendContainer }}" \
                           --name "plans/${{ parameters.workloadName }}-${{ env.key }}-$(Build.BuildId).tfplan" \
                           --file tfplan
                       fi
@@ -360,20 +433,20 @@ stages:
 
               - ${{ if eq(parameters.publishSavedPlan, true) }}:
                 - publish: >-
-                    $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}/tfplan
+                    ${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}/tfplan
                   artifact: >-
                     terraform-plan-${{ parameters.workloadName }}-${{ env.key }}
                   displayName: 'Publish saved Terraform plan'
 
               - publish: >-
-                  $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}/tfplan.txt
+                  ${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}/tfplan.txt
                 artifact: >-
                   terraform-plan-readable-${{ parameters.workloadName }}-${{ env.key }}
                 displayName: 'Publish readable Terraform plan'
 
               - ${{ if and(eq(parameters.publishJsonPlan, true), eq(parameters.publishSavedPlan, true)) }}:
                 - publish: >-
-                    $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}/tfplan.json
+                    ${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}/tfplan.json
                   artifact: >-
                     terraform-plan-json-${{ parameters.workloadName }}-${{ env.key }}
                   displayName: 'Publish JSON Terraform plan'
@@ -414,7 +487,7 @@ stages:
                 vmImage: ${{ parameters.agentImage }}
 
             steps:
-              - checkout: self
+              - checkout: ${{ parameters.checkoutRepository }}
 
               # The task's own scan output goes to a JSON file for the
               # extension's results view, not the console log, so the
@@ -428,7 +501,7 @@ stages:
                   version: ${{ parameters.trivyVersion }}
 
                   path: >-
-                    $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+                    ${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}
 
                   scanners: ${{ parameters.trivyScanners }}
                   severities: ${{ parameters.trivySeverities }}
@@ -464,7 +537,7 @@ stages:
                 vmImage: ${{ parameters.agentImage }}
 
             steps:
-              - checkout: self
+              - checkout: ${{ parameters.checkoutRepository }}
 
               - bash: |
                   set -euo pipefail
@@ -488,7 +561,7 @@ stages:
                   checkov --version
 
                   checkov \
-                    --directory "$(Build.SourcesDirectory)/${{ parameters.terraformRoot }}" \
+                    --directory "${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}" \
                     --framework terraform \
                     --download-external-modules false \
                     --compact \
@@ -542,7 +615,7 @@ stages:
               runOnce:
                 deploy:
                   steps:
-                    - checkout: self
+                    - checkout: ${{ parameters.checkoutRepository }}
 
                     - ${{ if eq(parameters.publishSavedPlan, true) }}:
                       - download: current
@@ -562,7 +635,7 @@ stages:
 
                           cp \
                             "$(Pipeline.Workspace)/terraform-plan-${{ parameters.workloadName }}-${{ env.key }}/tfplan" \
-                            "$(Build.SourcesDirectory)/${{ parameters.terraformRoot }}/tfplan"
+                            "${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}/tfplan"
                         displayName: 'Restore saved Terraform plan'
 
                     - ${{ if eq(parameters.publishSavedPlan, true) }}:
@@ -577,7 +650,7 @@ stages:
                           addSpnToEnvironment: true
 
                           workingDirectory: >-
-                            $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+                            ${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}
 
                           inlineScript: |
                             set -euxo pipefail
@@ -605,10 +678,10 @@ stages:
                             terraform init \
                               -input=false \
                               -reconfigure \
-                              -backend-config="subscription_id=$(backendSubscriptionId)" \
-                              -backend-config="resource_group_name=$(backendResourceGroup)" \
-                              -backend-config="storage_account_name=$(backendStorageAccount)" \
-                              -backend-config="container_name=$(backendContainer)" \
+                              -backend-config="subscription_id=${{ parameters.backendSubscriptionId }}" \
+                              -backend-config="resource_group_name=${{ parameters.backendResourceGroup }}" \
+                              -backend-config="storage_account_name=${{ parameters.backendStorageAccount }}" \
+                              -backend-config="container_name=${{ parameters.backendContainer }}" \
                               -backend-config="key=${{ env.value.stateKey }}" \
                               -backend-config="use_azuread_auth=true"
 
@@ -634,7 +707,7 @@ stages:
                           addSpnToEnvironment: true
 
                           workingDirectory: >-
-                            $(Build.SourcesDirectory)/${{ parameters.terraformRoot }}
+                            ${{ parameters.sourcesDirectory }}/${{ parameters.terraformRoot }}
 
                           inlineScript: |
                             set -euxo pipefail
@@ -662,17 +735,17 @@ stages:
                             terraform init \
                               -input=false \
                               -reconfigure \
-                              -backend-config="subscription_id=$(backendSubscriptionId)" \
-                              -backend-config="resource_group_name=$(backendResourceGroup)" \
-                              -backend-config="storage_account_name=$(backendStorageAccount)" \
-                              -backend-config="container_name=$(backendContainer)" \
+                              -backend-config="subscription_id=${{ parameters.backendSubscriptionId }}" \
+                              -backend-config="resource_group_name=${{ parameters.backendResourceGroup }}" \
+                              -backend-config="storage_account_name=${{ parameters.backendStorageAccount }}" \
+                              -backend-config="container_name=${{ parameters.backendContainer }}" \
                               -backend-config="key=${{ env.value.stateKey }}" \
                               -backend-config="use_azuread_auth=true"
 
                             az storage blob download \
                               --auth-mode login \
-                              --account-name "$(backendStorageAccount)" \
-                              --container-name "$(backendContainer)" \
+                              --account-name "${{ parameters.backendStorageAccount }}" \
+                              --container-name "${{ parameters.backendContainer }}" \
                               --name "plans/${{ parameters.workloadName }}-${{ env.key }}-$(Build.BuildId).tfplan" \
                               --file tfplan
 
@@ -684,8 +757,8 @@ stages:
 
                             az storage blob delete \
                               --auth-mode login \
-                              --account-name "$(backendStorageAccount)" \
-                              --container-name "$(backendContainer)" \
+                              --account-name "${{ parameters.backendStorageAccount }}" \
+                              --container-name "${{ parameters.backendContainer }}" \
                               --name "plans/${{ parameters.workloadName }}-${{ env.key }}-$(Build.BuildId).tfplan"
 
 
@@ -747,8 +820,8 @@ stages:
 
                     blob_exists="$(az storage blob exists \
                       --auth-mode login \
-                      --account-name "$(backendStorageAccount)" \
-                      --container-name "$(backendContainer)" \
+                      --account-name "${{ parameters.backendStorageAccount }}" \
+                      --container-name "${{ parameters.backendContainer }}" \
                       --name "$blob_name" \
                       --query exists \
                       --output tsv)"
@@ -756,8 +829,8 @@ stages:
                     if [ "$blob_exists" = "true" ]; then
                       az storage blob delete \
                         --auth-mode login \
-                        --account-name "$(backendStorageAccount)" \
-                        --container-name "$(backendContainer)" \
+                        --account-name "${{ parameters.backendStorageAccount }}" \
+                        --container-name "${{ parameters.backendContainer }}" \
                         --name "$blob_name"
                     else
                       echo "Plan blob already removed."

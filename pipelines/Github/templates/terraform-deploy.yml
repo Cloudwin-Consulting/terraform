@@ -26,6 +26,29 @@
 # be referenced there. Copy this file and the workload workflows into
 # .github/workflows/ (flat - subfolders are not supported).
 #
+# This workflow can equally be hosted in a shared template repository.
+# Everything it needs already crosses a repository boundary: the
+# backend settings arrive as inputs and the Azure identity through the
+# declared secrets below, so nothing here has to change. Callers name
+# the owner and repository in full and pin a ref:
+#
+#   uses: Cloudwin-Consulting/pipeline-templates/.github/workflows/terraform-deploy.yml@v1
+#
+# Three differences from the same-repository form are worth knowing:
+# the ref (branch, tag or SHA) is mandatory; the file still has to sit
+# directly in .github/workflows/ of the template repository; and
+# secrets are not inherited across repositories, so callers keep
+# mapping them explicitly (or pass `secrets: inherit`). A private or
+# internal template repository must also allow the consuming
+# repositories under Settings -> Actions -> Access.
+#
+# actions/checkout in the jobs below still checks out the caller's
+# repository, so terraformRoot keeps resolving against the workload's
+# code wherever this workflow is hosted.
+#
+# See pipelines/Github/examples/cross-repo-standalone-app.yml for a
+# complete caller.
+#
 # This file deliberately contains no push or pull_request triggers.
 # Runs are only ever started through the workload workflows.
 
