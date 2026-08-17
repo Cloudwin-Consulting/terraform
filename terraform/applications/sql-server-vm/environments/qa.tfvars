@@ -42,19 +42,19 @@ data_disks = [
   {
     name         = "data"
     disk_size_gb = 256
-    lun          = 1
+    lun          = 0
     role         = "data"
   },
   {
     name         = "log"
     disk_size_gb = 128
-    lun          = 2
+    lun          = 1
     role         = "log"
   },
   {
     name         = "tempdb"
     disk_size_gb = 128
-    lun          = 3
+    lun          = 2
     role         = "temp_db"
   },
 ]

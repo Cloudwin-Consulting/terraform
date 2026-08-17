@@ -56,7 +56,7 @@ data_disks = [
   {
     name                 = "data"
     disk_size_gb         = 128
-    lun                  = 1
+    lun                  = 0
     storage_account_type = "Premium_LRS"
   }
 ]

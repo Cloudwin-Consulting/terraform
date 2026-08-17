@@ -40,14 +40,14 @@ data_disks = [
   {
     name                 = "data"
     disk_size_gb         = 128
-    lun                  = 1
+    lun                  = 0
     role                 = "data"
     storage_account_type = "StandardSSD_LRS"
   },
   {
     name                 = "log"
     disk_size_gb         = 64
-    lun                  = 2
+    lun                  = 1
     role                 = "log"
     storage_account_type = "StandardSSD_LRS"
   },
