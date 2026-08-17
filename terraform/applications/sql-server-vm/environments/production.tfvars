@@ -60,24 +60,28 @@ data_disks = [
   {
     name                 = "data1"
     disk_size_gb         = 512
+    lun                  = 1
     role                 = "data"
     storage_account_type = "Premium_LRS"
   },
   {
     name                 = "data2"
     disk_size_gb         = 512
+    lun                  = 2
     role                 = "data"
     storage_account_type = "Premium_LRS"
   },
   {
     name                 = "log"
     disk_size_gb         = 256
+    lun                  = 3
     role                 = "log"
     storage_account_type = "Premium_LRS"
   },
   {
     name                 = "tempdb"
     disk_size_gb         = 256
+    lun                  = 4
     role                 = "temp_db"
     storage_account_type = "Premium_LRS"
   },

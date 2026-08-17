@@ -148,10 +148,11 @@ variable "os_disk" {
 }
 
 variable "data_disks" {
-  description = "Managed data disks created for each machine and laid out by the SQL IaaS Agent extension, in LUN order. Names are prefixed with the machine name. Each disk declares the role its volume serves - data, log or temp_db - and disks sharing a role are pooled into one volume, so add disks to a role to scale its throughput past a single disk's limits. Leave caching unset to get the right value for the role: ReadOnly for data and tempdb, None for log."
+  description = "Managed data disks created for each machine and laid out by the SQL IaaS Agent extension. Names are prefixed with the machine name. Each disk declares the LUN it attaches at and the role its volume serves - data, log or temp_db - and disks sharing a role are pooled into one volume, so add disks to a role to scale its throughput past a single disk's limits. The storage layout is addressed by LUN rather than list position, so treat a deployed disk's LUN as fixed: changing it detaches and reattaches the disk. Leave caching unset to get the right value for the role: ReadOnly for data and tempdb, None for log."
   type = list(object({
     name                          = string
     disk_size_gb                  = number
+    lun                           = number
     role                          = optional(string, "data")
     storage_account_type          = optional(string, "Premium_LRS")
     caching                       = optional(string)
@@ -166,11 +167,13 @@ variable "data_disks" {
     {
       name         = "data"
       disk_size_gb = 256
+      lun          = 1
       role         = "data"
     },
     {
       name         = "log"
       disk_size_gb = 128
+      lun          = 2
       role         = "log"
     },
   ]

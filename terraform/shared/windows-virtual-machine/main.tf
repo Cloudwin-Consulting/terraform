@@ -142,10 +142,9 @@ module "data_disk" {
   tags                          = var.tags
 }
 
-# Attaches the data disks in the order given, using the list index as
-# the LUN.
+# Attaches the data disks at the LUN each one declares.
 resource "azurerm_virtual_machine_data_disk_attachment" "this" {
-  for_each = { for index, disk in var.data_disks : disk.name => merge(disk, { lun = index }) }
+  for_each = { for disk in var.data_disks : disk.name => disk }
 
   managed_disk_id    = module.data_disk[each.key].id
   virtual_machine_id = azurerm_windows_virtual_machine.this.id

@@ -33,21 +33,21 @@ locals {
   }
 
   # The disks handed to the virtual machine module, which attaches
-  # them in list order using the index as the LUN. Keeping that order
-  # here is what lets the storage configuration below address each
-  # disk by LUN.
+  # each one at the LUN it declares.
   data_disks = [
     for disk in var.data_disks : merge(disk, {
       caching = coalesce(disk.caching, local.default_caching_by_role[disk.role])
     })
   ]
 
-  # The LUNs backing each storage role, in the same order the disks
-  # were declared. A role with no disks gets an empty list and its
-  # settings block is left out entirely.
+  # The LUNs backing each storage role, taken from the disks
+  # themselves rather than their position in the list, so reordering
+  # or removing a disk never silently relabels the volumes underneath
+  # a running instance. A role with no disks gets an empty list and
+  # its settings block is left out entirely.
   luns_by_role = {
     for role in keys(local.default_caching_by_role) :
-    role => [for index, disk in var.data_disks : index if disk.role == role]
+    role => [for disk in var.data_disks : disk.lun if disk.role == role]
   }
 
   # SQL Server's own automated patching drives the maintenance window

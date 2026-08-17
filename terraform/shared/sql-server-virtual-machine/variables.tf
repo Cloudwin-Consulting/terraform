@@ -81,9 +81,11 @@ variable "os_disk" {
 
 variable "data_disks" {
   description = <<-EOT
-    Managed data disks created, attached and then laid out by the SQL IaaS Agent extension, in LUN order.
+    Managed data disks created, attached and then laid out by the SQL IaaS Agent extension.
 
-    Each disk declares the role its volume serves: `data` for database files, `log` for transaction logs and `temp_db` for tempdb. Disks sharing a role are pooled into one volume, so multiple disks per role is the way to scale throughput past a single disk's limits.
+    Each disk declares the LUN it attaches at and the role its volume serves: `data` for database files, `log` for transaction logs and `temp_db` for tempdb. Disks sharing a role are pooled into one volume, so multiple disks per role is the way to scale throughput past a single disk's limits.
+
+    The storage layout is addressed by the LUNs declared here, not by the disks' position in the list, so reordering or removing a disk never silently relabels the volumes underneath a running instance. Changing a LUN on a deployed disk detaches and reattaches it, so treat LUNs as fixed once a machine is in service.
 
     Leave caching unset to get Microsoft's guidance for the role: ReadOnly for data and tempdb, None for log (host caching on a log volume can lose writes the log has already acknowledged).
 
@@ -93,6 +95,7 @@ variable "data_disks" {
   type = list(object({
     name                          = string
     disk_size_gb                  = number
+    lun                           = number
     role                          = optional(string, "data")
     storage_account_type          = optional(string, "Premium_LRS")
     caching                       = optional(string)
@@ -107,11 +110,13 @@ variable "data_disks" {
     {
       name         = "data"
       disk_size_gb = 256
+      lun          = 1
       role         = "data"
     },
     {
       name         = "log"
       disk_size_gb = 128
+      lun          = 2
       role         = "log"
     },
   ]
@@ -124,6 +129,16 @@ variable "data_disks" {
   validation {
     condition     = length(distinct([for disk in var.data_disks : disk.name])) == length(var.data_disks)
     error_message = "Data disk names must be unique within the virtual machine."
+  }
+
+  validation {
+    condition     = length(distinct([for disk in var.data_disks : disk.lun])) == length(var.data_disks)
+    error_message = "Each data disk must have a unique LUN: the SQL storage configuration addresses the volumes by LUN, so a duplicate would put two disks in the same slot."
+  }
+
+  validation {
+    condition     = alltrue([for disk in var.data_disks : disk.lun >= 0 && disk.lun <= 63])
+    error_message = "Data disk LUNs must be between 0 and 63."
   }
 
   validation {
