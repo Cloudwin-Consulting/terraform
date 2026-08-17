@@ -152,7 +152,7 @@ resource "azurerm_virtual_machine_data_disk_attachment" "this" {
   }
 
   managed_disk_id    = module.data_disk[each.key].id
-  virtual_machine_id = azurerm_windows_virtual_machine.vm.id
+  virtual_machine_id = azurerm_linux_virtual_machine.this.id
   lun                = each.value.lun
   caching            = each.value.caching
 }

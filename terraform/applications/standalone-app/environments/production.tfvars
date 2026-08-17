@@ -86,7 +86,7 @@ windows_data_disks = [
   {
     name                 = "data"
     disk_size_gb         = 256
-    lun                  = 1
+    lun                  = 0
     storage_account_type = "Premium_LRS"
   }
 ]

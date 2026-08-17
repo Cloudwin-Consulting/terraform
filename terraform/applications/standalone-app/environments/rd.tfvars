@@ -83,6 +83,7 @@ windows_data_disks = [
   {
     name         = "data"
     disk_size_gb = 32
+    lun          = 0
   }
 ]
 
