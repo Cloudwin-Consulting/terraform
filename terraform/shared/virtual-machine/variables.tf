@@ -63,10 +63,11 @@ variable "os_disk" {
 }
 
 variable "data_disks" {
-  description = "Managed data disks created and attached to the virtual machine, in LUN order. Disks default to private-only access and support customer-managed key encryption through a disk encryption set."
+  description = "Managed data disks created and attached to the virtual machine, determined by LUN. Disks default to private-only access and support customer-managed key encryption through a disk encryption set."
   type = list(object({
     name                          = string
     disk_size_gb                  = number
+    lun                           = number
     storage_account_type          = optional(string, "StandardSSD_LRS")
     caching                       = optional(string, "ReadWrite")
     tier                          = optional(string)
@@ -80,6 +81,13 @@ variable "data_disks" {
   validation {
     condition     = alltrue([for disk in var.data_disks : disk.disk_size_gb >= 1 && disk.disk_size_gb <= 65536 && contains(["AllowAll", "AllowPrivate", "DenyAll"], disk.network_access_policy)])
     error_message = "Data disks must be 1-65536 GB with a network_access_policy of AllowAll, AllowPrivate or DenyAll."
+  }
+
+  validation {
+    condition = length(var.data_disks) == length(
+      distinct([for disk in var.data_disks : disk.lun])
+    )
+    error_message = "Each data disk must have a unique LUN."
   }
 }
 

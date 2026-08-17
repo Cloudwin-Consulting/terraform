@@ -381,10 +381,11 @@ variable "linux_os_disk" {
 }
 
 variable "linux_data_disks" {
-  description = "Managed data disks created and attached to each Linux machine, in LUN order. Names are prefixed with the machine name, so each machine gets its own disks."
+  description = "Managed data disks created and attached to each Linux machine, determined by LUN. Names are prefixed with the machine name, so each machine gets its own disks."
   type = list(object({
     name                          = string
     disk_size_gb                  = number
+    lun                           = number
     storage_account_type          = optional(string, "StandardSSD_LRS")
     caching                       = optional(string, "ReadWrite")
     tier                          = optional(string)
@@ -465,10 +466,11 @@ variable "windows_os_disk" {
 }
 
 variable "windows_data_disks" {
-  description = "Managed data disks created and attached to each Windows machine, in LUN order. Names are prefixed with the machine name, so each machine gets its own disks."
+  description = "Managed data disks created and attached to each Windows machine, determined by LUN. Names are prefixed with the machine name, so each machine gets its own disks."
   type = list(object({
     name                          = string
     disk_size_gb                  = number
+    lun                           = number
     storage_account_type          = optional(string, "StandardSSD_LRS")
     caching                       = optional(string, "ReadWrite")
     tier                          = optional(string)

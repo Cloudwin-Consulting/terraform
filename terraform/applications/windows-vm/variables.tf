@@ -148,10 +148,11 @@ variable "os_disk" {
 }
 
 variable "data_disks" {
-  description = "Managed data disks created and attached to each virtual machine, in LUN order. Names are prefixed with the machine name. Disks default to private-only access and support customer-managed key encryption through a disk encryption set."
+  description = "Managed data disks created and attached to each virtual machine, determined by LUN. Names are prefixed with the machine name. Disks default to private-only access and support customer-managed key encryption through a disk encryption set."
   type = list(object({
     name                          = string
     disk_size_gb                  = number
+    lun                           = number
     storage_account_type          = optional(string, "StandardSSD_LRS")
     caching                       = optional(string, "ReadWrite")
     tier                          = optional(string)
