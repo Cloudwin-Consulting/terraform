@@ -106,6 +106,11 @@ variable "data_disks" {
     )
     error_message = "Each data disk must have a unique LUN."
   }
+
+  validation {
+    condition     = alltrue([for disk in var.data_disks : disk.lun >= 0 && disk.lun <= 63])
+    error_message = "Data disk LUNs must be between 0 and 63. LUN 0 is the first data disk slot, not the operating system disk, which is attached outside the data disk LUN space."
+  }
 }
 
 variable "source_image_id" {
