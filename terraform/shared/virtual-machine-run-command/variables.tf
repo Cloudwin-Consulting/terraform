@@ -14,13 +14,31 @@ variable "location" {
 }
 
 variable "script_content" {
-  description = "The script to run, e.g. loaded from the repository with file(). Exactly one of script_content and script_uri must be set."
+  description = "The script to run, e.g. loaded from the repository with file(). Exactly one of script_content, script_files and script_uri must be set."
   type        = string
   default     = null
 
   validation {
-    condition     = (var.script_content == null) != (var.script_uri == null)
-    error_message = "Set exactly one of script_content and script_uri as the script source."
+    condition = length([
+      for source in [var.script_content, var.script_uri, length(var.script_files) > 0 ? "script_files" : null] :
+      source if source != null
+    ]) == 1
+    error_message = "Set exactly one of script_content, script_files and script_uri as the script source."
+  }
+}
+
+variable "script_files" {
+  description = "Paths to script files to run one after another, in list order, as one run command - e.g. [\"$${path.module}/scripts/a.ps1\", \"$${path.module}/scripts/b.ps1\"]. Use .sh files (or any script with a shebang) for a Linux machine, or .ps1 files for a Windows one. The module reads and packages the files itself; the run stops at the first script that fails."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition = (
+      alltrue([for path in var.script_files : endswith(lower(path), ".ps1")]) ||
+      !anytrue([for path in var.script_files : endswith(lower(path), ".ps1")])
+    )
+    error_message = "script_files must be all .ps1 files (Windows) or have no .ps1 files (Linux), not a mix."
   }
 }
 
